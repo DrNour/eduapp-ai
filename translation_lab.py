@@ -965,7 +965,8 @@ def instructor_dashboard():
 
 
 # ---------------- Student Dashboard ----------------
-def student_dashboard():
+
+     def student_dashboard():
     st.title("Student Dashboard")
 
     exercises = load_json(EXERCISES_FILE)
@@ -986,6 +987,8 @@ def student_dashboard():
         return
 
     ex = exercises[ex_id]
+    existing_sub = submissions.get(student_name, {}).get(ex_id, {})
+
     st.subheader("Source Text")
     st.markdown(
         f"<div style='font-family:Times New Roman;font-size:12pt;'>{ex.get('source_text', '')}</div>",
@@ -993,9 +996,24 @@ def student_dashboard():
     )
 
     task_options = ["Translate"] if not ex.get("mt_text") else ["Translate", "Post-edit MT"]
-    task_type = st.radio("Task Type", task_options, horizontal=True)
 
-    initial_text = "" if task_type == "Translate" else (ex.get("mt_text", "") or "")
+    default_task_type = existing_sub.get("task_type", task_options[0])
+    if default_task_type not in task_options:
+        default_task_type = task_options[0]
+
+    task_type = st.radio(
+        "Task Type",
+        task_options,
+        horizontal=True,
+        index=task_options.index(default_task_type)
+    )
+
+    if existing_sub.get("student_text"):
+        initial_text = existing_sub.get("student_text", "")
+    else:
+        initial_text = "" if task_type == "Translate" else (ex.get("mt_text", "") or "")
+
+    default_reflection = existing_sub.get("reflection", "")
 
     start_key = f"start_time_{student_name}_{ex_id}"
     keys_key = f"chars_{student_name}_{ex_id}"
@@ -1005,68 +1023,96 @@ def student_dashboard():
         st.session_state[keys_key] = 0
 
     with st.form(key=f"exercise_form_{student_name}_{ex_id}"):
-        student_text = st.text_area("Type your translation / post-edit here", initial_text, height=300)
-        reflection = st.text_area("Brief reflection (what changed / why?)", "", height=80)
+        student_text = st.text_area(
+            "Type your translation / post-edit here",
+            value=initial_text,
+            height=300
+        )
+        reflection = st.text_area(
+            "Brief reflection (what changed / why?)",
+            value=default_reflection,
+            height=80
+        )
         submitted = st.form_submit_button("Submit")
 
-    if not submitted:
+    if submitted:
+        time_spent = time.time() - st.session_state[start_key]
+        st.session_state[keys_key] = len(student_text)
+
+        metrics = evaluate_translation(
+            student_text,
+            mt_text=ex.get("mt_text"),
+            reference=None,
+            task_type=task_type,
+            source_text=ex.get("source_text", ""),
+        )
+
+        submissions[student_name][ex_id] = {
+            "source_text": ex.get("source_text", ""),
+            "mt_text": ex.get("mt_text"),
+            "student_text": student_text,
+            "task_type": task_type,
+            "time_spent_sec": round(time_spent, 2),
+            "keystrokes": st.session_state[keys_key],
+            "metrics": metrics,
+            "reflection": reflection,
+        }
+        save_json(SUBMISSIONS_FILE, submissions)
+
+        points = 0
+        try:
+            if metrics.get("BLEU") is not None:
+                points += int(metrics["BLEU"])
+            if metrics.get("chrF++") is not None:
+                points += int(metrics["chrF++"] / 2)
+            if task_type == "Post-edit MT":
+                points += max(0, 10 - int(metrics["edits"]))
+        except Exception:
+            pass
+        update_leaderboard(student_name, points)
+
+        st.success("Submission saved!")
+
+        existing_sub = submissions[student_name][ex_id]
+
+    # If no saved submission yet, stop here
+    if not existing_sub or not existing_sub.get("student_text", "").strip():
+        st.info("Write your translation and click Submit first. Then AI feedback and AI Tutor will work.")
         return
 
-    time_spent = time.time() - st.session_state[start_key]
-    st.session_state[keys_key] = len(student_text)
-
-    metrics = evaluate_translation(
-        student_text,
-        mt_text=ex.get("mt_text"),
-        reference=None,
-        task_type=task_type,
-        source_text=ex.get("source_text", ""),
-    )
-
-    submissions[student_name][ex_id] = {
-        "source_text": ex.get("source_text", ""),
-        "mt_text": ex.get("mt_text"),
-        "student_text": student_text,
-        "task_type": task_type,
-        "time_spent_sec": round(time_spent, 2),
-        "keystrokes": st.session_state[keys_key],
-        "metrics": metrics,
-        "reflection": reflection,
-    }
-    save_json(SUBMISSIONS_FILE, submissions)
-
-    points = 0
-    try:
-        if metrics.get("BLEU") is not None:
-            points += int(metrics["BLEU"])
-        if metrics.get("chrF++") is not None:
-            points += int(metrics["chrF++"] / 2)
-        if task_type == "Post-edit MT":
-            points += max(0, 10 - int(metrics["edits"]))
-    except Exception:
-        pass
-    update_leaderboard(student_name, points)
-
-    st.success("Submission saved!")
+    # Use saved submission from this point onward
+    student_text = existing_sub.get("student_text", "")
+    reflection = existing_sub.get("reflection", "")
+    task_type = existing_sub.get("task_type", task_type)
+    time_spent = existing_sub.get("time_spent_sec", 0)
+    st.session_state[keys_key] = existing_sub.get("keystrokes", len(student_text))
+    metrics = existing_sub.get("metrics", {})
 
     def _fmt(v):
         return "—" if v is None else v
 
     st.subheader("Your Metrics")
     st.markdown(f"""
-- **Length Ratio** (target/src): {_fmt(metrics['length_ratio'])}
-- **BLEU**: {_fmt(metrics['BLEU'])}
-- **chrF++**: {_fmt(metrics['chrF++'])}
-- **BERTScore F1**: {_fmt(metrics['BERTScore_F1'])}
-- **Additions**: {_fmt(metrics['additions'])}
-- **Deletions**: {_fmt(metrics['deletions'])}
-- **Edits**: {_fmt(metrics['edits'])}
-- **Time Spent**: {round(time_spent, 2)} sec
+- **Length Ratio** (target/src): {_fmt(metrics.get('length_ratio'))}
+- **BLEU**: {_fmt(metrics.get('BLEU'))}
+- **chrF++**: {_fmt(metrics.get('chrF++'))}
+- **BERTScore F1**: {_fmt(metrics.get('BERTScore_F1'))}
+- **Additions**: {_fmt(metrics.get('additions'))}
+- **Deletions**: {_fmt(metrics.get('deletions'))}
+- **Edits**: {_fmt(metrics.get('edits'))}
+- **Time Spent**: {time_spent} sec
 - **Characters Typed**: {st.session_state[keys_key]}
 """)
 
     extra = quick_linguistic_hints(ex.get("source_text", ""), student_text)
-    feedback_msgs = generate_feedback(metrics, task_type, ex.get("source_text", ""), student_text, extra)
+    feedback_msgs = generate_feedback(
+        metrics,
+        task_type,
+        ex.get("source_text", ""),
+        student_text,
+        extra
+    )
+
     st.subheader("Adaptive Feedback (metrics-based)")
     if feedback_msgs:
         for m in feedback_msgs:
@@ -1107,6 +1153,71 @@ def student_dashboard():
     except Exception:
         st.info("Progress charts unavailable.")
 
+    show_leaderboard()
+
+    st.subheader("Optional AI Feedback (experimental)")
+    if st.button("Get AI feedback on your submission"):
+        prompt = build_ai_feedback_prompt(
+            ex.get("source_text", ""),
+            ex.get("mt_text", "") or "",
+            student_text,
+            task_type,
+        )
+        with st.spinner("Requesting AI feedback..."):
+            ai_text = generate_ai_feedback(prompt)
+
+        if ai_text:
+            st.markdown("### AI feedback / suggestion")
+            st.write(ai_text)
+        else:
+            st.error("AI call returned no text. Check API key, model name, and OpenAI package version.")
+
+    st.subheader("AI Tutor Chat")
+    student_prompt = st.text_area(
+        "Ask the AI tutor a question about your translation",
+        height=120,
+        placeholder="Example: Is my Arabic too literal? Suggest 2 more idiomatic options for the first sentence.",
+        key=f"ai_tutor_prompt_{student_name}_{ex_id}",
+    )
+
+    if st.button("Ask AI Tutor"):
+        if not student_prompt.strip():
+            st.warning("Please enter a prompt.")
+        else:
+            system_prompt = '''
+You are an expert English-Arabic translation tutor for university students.
+Help students improve their work.
+Do not automatically complete the whole task unless explicitly requested.
+Focus on accuracy, register, idiomaticity, and cultural appropriateness.
+Keep responses clear and concise.
+You may use both English and Arabic.
+'''
+
+            user_prompt = f"""
+TASK TYPE: {task_type}
+
+SOURCE TEXT:
+{ex.get('source_text', '')}
+
+MT OUTPUT:
+{ex.get('mt_text', '') or '(none)'}
+
+STUDENT SUBMISSION:
+{student_text}
+
+STUDENT QUESTION:
+{student_prompt}
+"""
+
+            with st.spinner("Requesting AI response..."):
+                ai_text = ask_ai_tutor(system_prompt, user_prompt)
+
+            if ai_text:
+                st.markdown("### AI Tutor Response")
+                st.write(ai_text)
+            else:
+                st.error("AI call returned no text. Check API key, model name, and OpenAI package version.")   
+     
     show_leaderboard()
 
     st.subheader("Optional AI Feedback (experimental)")
