@@ -34,14 +34,13 @@ try:
 except Exception:
     _HAVE_MPL = False
 
-# Optional OpenAI (for ChatGPT-based feedback)
+# Optional OpenAI
 try:
     import openai
 except Exception:
     openai = None
 
-# ---------------- Proof-of-life banner (so you know this file is loaded) ----------------
-# Safe even in weird environments without __file__
+# ---------------- Proof-of-life banner ----------------
 try:
     THIS_FILE = os.path.abspath(__file__)
     LAST_EDIT = datetime.datetime.fromtimestamp(os.path.getmtime(THIS_FILE))
@@ -49,7 +48,7 @@ except Exception:
     THIS_FILE = "interactive_session"
     LAST_EDIT = datetime.datetime.now()
 
-# ---------------- Storage (JSON with basic locking & atomic writes) ----------------
+# ---------------- Storage ----------------
 DATA_DIR = Path("./data")
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -57,7 +56,6 @@ EXERCISES_FILE = DATA_DIR / "exercises.json"
 SUBMISSIONS_FILE = DATA_DIR / "submissions.json"
 LEADERBOARD_FILE = DATA_DIR / "leaderboard.json"
 
-# Localisation sticker/text/image tasks
 LOC_STICKERS_FILE = DATA_DIR / "loc_stickers.json"
 STICKER_IMG_DIR = DATA_DIR / "stickers"
 STICKER_IMG_DIR.mkdir(exist_ok=True)
@@ -84,22 +82,20 @@ def save_json(file: Path, data):
         tmp.replace(file)
 
 
-# ---------------- Auth (reads env vars OR Streamlit secrets safely) ----------------
+# ---------------- Secrets / Auth ----------------
 def get_secret(name, default=""):
     value = os.getenv(name, "")
     if value:
         return value
-
     try:
         if hasattr(st, "secrets") and name in st.secrets:
             return st.secrets[name]
     except Exception:
         pass
-
     return default
 
 
-_FALLBACK_PLAIN = "admin123"  # used only in dev mode
+_FALLBACK_PLAIN = "admin123"
 
 
 def check_password(typed: str) -> bool:
@@ -133,12 +129,6 @@ def has_instructor_auth_config() -> bool:
 
 # ---------------- AI backend diagnostics ----------------
 def get_ai_backend_status():
-    """
-    Check which AI backends are available:
-      - OpenAI (via OPENAI_API_KEY)
-      - Hugging Face (via HF_API_TOKEN)
-    Returns a dict with simple booleans + selected OpenAI model (if any).
-    """
     openai_key = get_secret("OPENAI_API_KEY", "")
     openai_available = bool(openai_key)
     openai_model = get_secret("OPENAI_MODEL", "gpt-4.1-mini")
@@ -180,15 +170,6 @@ def compute_edit_details(mt_text: str, student_text: str) -> Tuple[int, int, int
 
 # ---------------- Metrics ----------------
 def evaluate_translation(student_text, mt_text=None, reference=None, task_type="Translate", source_text=""):
-    """
-    Returns a metrics dict using:
-      - length_ratio (target tokens / source tokens)
-      - BLEU (sacrebleu, if reference provided)
-      - chrF++ (sacrebleu, if reference provided)
-      - BERTScore_F1 (if available & reference provided)
-      - edit counts for post-edit tasks
-    All metrics gracefully fallback to None if libs or references are missing.
-    """
     src_len = max(1, len(_tokenize(source_text)))
     tgt_len = len(_tokenize(student_text))
     length_ratio = round(tgt_len / src_len, 3)
@@ -222,11 +203,11 @@ def evaluate_translation(student_text, mt_text=None, reference=None, task_type="
         "BERTScore_F1": None if bert_f1 is None else round(bert_f1, 3),
         "additions": additions,
         "deletions": deletions,
-        "edits": edits,
+        "edits": edits
     }
 
 
-# ---------------- Track Changes (HTML + DOCX) ----------------
+# ---------------- Track Changes ----------------
 def _join_tokens_for_display(tokens: List[str]) -> str:
     out = " ".join(tokens)
     out = re.sub(r"\s+([.,!?;:])", r"\1", out)
@@ -247,7 +228,6 @@ def diff_text(baseline: str, student_text: str) -> str:
     return _join_tokens_for_display(parts)
 
 
-# ---------- Safe text for DOCX (strip invalid XML chars) ----------
 _INVALID_XML_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 
 
@@ -334,7 +314,7 @@ def export_summary_excel(submissions):
                 "Deletions": m.get("deletions"),
                 "Edits": m.get("edits"),
                 "Time Spent (s)": sub.get("time_spent_sec", 0),
-                "Characters Typed": sub.get("keystrokes", 0),
+                "Characters Typed": sub.get("keystrokes", 0)
             })
     df = pd.DataFrame(rows)
     buf = BytesIO()
@@ -365,7 +345,7 @@ def show_leaderboard():
         st.info("No leaderboard data yet.")
 
 
-# ---------------- Instructor: manage sticker/text/image localisation tasks ----------------
+# ---------------- Instructor sticker manager ----------------
 def localisation_sticker_manager():
     st.subheader("Instructor – Sticker / text / image localisation tasks")
 
@@ -415,7 +395,7 @@ def localisation_sticker_manager():
         instructions = st.text_area(
             "Instructions for students (what to do with this text / image)",
             value=default_instr,
-            height=120,
+            height=120
         )
 
         st.write("Sticker / image (choose either URL or upload, both optional):")
@@ -473,7 +453,7 @@ def localisation_sticker_manager():
             "image_type": image_type,
             "image_path": image_path,
             "image_url": image_url_final,
-            "created_at": datetime.datetime.now().isoformat(),
+            "created_at": datetime.datetime.now().isoformat()
         }
         save_json(LOC_STICKERS_FILE, loc_stickers)
         st.success(f"Task {task_id} saved.")
@@ -484,7 +464,7 @@ def localisation_sticker_manager():
         st.success(f"Task {selection} deleted.")
 
 
-# ---------------- Optional AI generator for exercises (HF only) ----------------
+# ---------------- Optional AI exercise generator ----------------
 def ai_generate_text(prompt):
     HF_TOKEN = get_secret("HF_API_TOKEN", "")
     if not HF_TOKEN:
@@ -498,7 +478,7 @@ def ai_generate_text(prompt):
             "https://api-inference.huggingface.co/models/gpt2",
             headers=headers,
             json=payload,
-            timeout=15,
+            timeout=15
         )
         if response.status_code == 200:
             data = response.json()
@@ -516,7 +496,7 @@ _AR_LETTERS = r"\u0600-\u06FF"
 def _tokenize_words(text: str):
     return re.findall(
         r"[A-Za-z" + _AR_LETTERS + r"]+[’'\-]?[A-Za-z" + _AR_LETTERS + r"]+|\d+(?:[.,]\d+)?",
-        text,
+        text
     )
 
 
@@ -558,15 +538,16 @@ def quick_linguistic_hints(source_text: str, student_text: str):
             hints.append({
                 "rule": "numbers_missing",
                 "message": "Some figures from the source didn’t appear in your text.",
-                "evidence": f"Missing: {_short_list(missing_nums)}",
+                "evidence": f"Missing: {_short_list(missing_nums)}"
             })
 
         for sym_open, sym_close, label in [
             ("(", ")", "parentheses"),
             ("[", "]", "brackets"),
-            ("{", "}", "braces"),
+            ("{", "}", "braces")
         ]:
-            if source_text.count(sym_open) != student_text.count(sym_open) or source_text.count(sym_close) != student_text.count(sym_close):
+            if source_text.count(sym_open) != student_text.count(sym_open) or \
+               source_text.count(sym_close) != student_text.count(sym_close):
                 hints.append({
                     "rule": f"{label}_unbalanced",
                     "message": f"{label.capitalize()} look unbalanced.",
@@ -574,13 +555,13 @@ def quick_linguistic_hints(source_text: str, student_text: str):
                         f"Source {sym_open}/{sym_close}: "
                         f"{source_text.count(sym_open)}/{source_text.count(sym_close)}; "
                         f"Your text: {student_text.count(sym_open)}/{student_text.count(sym_close)}"
-                    ),
+                    )
                 })
         if source_text.count('"') != student_text.count('"'):
             hints.append({
                 "rule": "quotes_unbalanced",
                 "message": "Quotation marks may be unbalanced.",
-                "evidence": f"Source quotes: {source_text.count(chr(34))}; Yours: {student_text.count(chr(34))}",
+                "evidence": f"Source quotes: {source_text.count(chr(34))}; Yours: {student_text.count(chr(34))}"
             })
 
         src_terms = _likely_terms(source_text)
@@ -590,14 +571,14 @@ def quick_linguistic_hints(source_text: str, student_text: str):
             hints.append({
                 "rule": "terms_missing",
                 "message": "Some key terms/names from the source weren’t reflected.",
-                "evidence": f"Examples: {_short_list(missing_terms)}",
+                "evidence": f"Examples: {_short_list(missing_terms)}"
             })
     except Exception:
         pass
     return hints
 
 
-# ---------------- Adaptive Feedback (metrics + hints) ----------------
+# ---------------- Adaptive Feedback ----------------
 def generate_feedback(metrics: dict, task_type: str, source_text: str, student_text: str, extra_hints=None):
     msgs = []
     lr = metrics.get("length_ratio")
@@ -612,13 +593,13 @@ def generate_feedback(metrics: dict, task_type: str, source_text: str, student_t
             msgs.append((
                 "edits_none",
                 "No edits were applied to the MT output.",
-                "Review the MT carefully—critical errors may remain.",
+                "Review the MT carefully—critical errors may remain."
             ))
         elif edits > 20:
             msgs.append((
                 "edits_many",
                 f"High edit volume detected: {edits} edits (additions {adds}, deletions {dels}).",
-                "Prioritize adequacy/accuracy first; avoid cosmetic rephrasing that doesn’t fix meaning.",
+                "Prioritize adequacy/accuracy first; avoid cosmetic rephrasing that doesn’t fix meaning."
             ))
 
     if lr is not None:
@@ -626,13 +607,13 @@ def generate_feedback(metrics: dict, task_type: str, source_text: str, student_t
             msgs.append((
                 "len_low",
                 f"Length ratio is {lr:.2f} (target ~0.90–1.20).",
-                "Your translation may be over-compressed—recheck for omitted content.",
+                "Your translation may be over-compressed—recheck for omitted content."
             ))
         elif lr > 1.30:
             msgs.append((
                 "len_high",
                 f"Length ratio is {lr:.2f} (target ~0.90–1.20).",
-                "Consider concision—trim redundancy and literal padding.",
+                "Consider concision—trim redundancy and literal padding."
             ))
 
     if bleu is not None and chrf is not None:
@@ -640,19 +621,19 @@ def generate_feedback(metrics: dict, task_type: str, source_text: str, student_t
             msgs.append((
                 "acc_low_flu_ok",
                 f"chrF++ is {chrf:.1f} (fluency ok) but BLEU is {bleu:.1f} (accuracy lagging).",
-                "Revisit terminology and key meaning units; cross-check against the source.",
+                "Revisit terminology and key meaning units; cross-check against the source."
             ))
         elif bleu >= 30 and chrf < 50:
             msgs.append((
                 "flu_low_acc_ok",
                 f"BLEU is {bleu:.1f} (accuracy acceptable) but chrF++ is {chrf:.1f} (fluency weak).",
-                "Polish cohesion and flow—simplify long clauses and connectors.",
+                "Polish cohesion and flow—simplify long clauses and connectors."
             ))
         elif bleu is not None and bleu < 20:
             msgs.append((
                 "both_low",
                 f"BLEU is {bleu:.1f}.",
-                "Start with adequacy: ensure all propositions are conveyed before stylistic edits.",
+                "Start with adequacy: ensure all propositions are conveyed before stylistic edits."
             ))
 
     if extra_hints:
@@ -677,7 +658,7 @@ def generate_feedback(metrics: dict, task_type: str, source_text: str, student_t
     return final
 
 
-# ---------------- AI feedback prompt & backend ----------------
+# ---------------- AI ----------------
 def build_ai_feedback_prompt(source_text: str, mt_text: str, student_text: str, task_type: str) -> str:
     mt_block = mt_text if mt_text else "(no MT output – direct translation task)"
     return f"""
@@ -706,10 +687,6 @@ You may answer partly in Arabic where it helps the student, but keep the structu
 
 
 def ask_ai_tutor(system_prompt: str, user_prompt: str):
-    """
-    General-purpose AI call for student prompting.
-    Uses OpenAI first, then Hugging Face fallback if configured.
-    """
     openai_key = get_secret("OPENAI_API_KEY", "")
     openai_model = get_secret("OPENAI_MODEL", "gpt-4.1-mini")
 
@@ -717,6 +694,7 @@ def ask_ai_tutor(system_prompt: str, user_prompt: str):
         try:
             if hasattr(openai, "OpenAI"):
                 client = openai.OpenAI(api_key=openai_key)
+
                 try:
                     resp = client.responses.create(
                         model=openai_model,
@@ -740,6 +718,7 @@ def ask_ai_tutor(system_prompt: str, user_prompt: str):
                     text = resp.choices[0].message.content
                     if text:
                         return text.strip()
+
             else:
                 openai.api_key = openai_key
                 resp = openai.ChatCompletion.create(
@@ -754,8 +733,9 @@ def ask_ai_tutor(system_prompt: str, user_prompt: str):
                 text = resp.choices[0].message["content"]
                 if text:
                     return text.strip()
-        except Exception:
-            pass
+
+        except Exception as e:
+            return f"OpenAI error: {e}"
 
     hf_token = get_secret("HF_API_TOKEN", "")
     if hf_token:
@@ -773,8 +753,9 @@ def ask_ai_tutor(system_prompt: str, user_prompt: str):
                 data = response.json()
                 if isinstance(data, list) and data and "generated_text" in data[0]:
                     return data[0]["generated_text"].strip()
-        except Exception:
-            pass
+            return f"Hugging Face error: status {response.status_code}"
+        except Exception as e:
+            return f"Hugging Face error: {e}"
 
     return None
 
@@ -857,13 +838,16 @@ def instructor_dashboard():
 
     if save_btn:
         try:
-            next_id = str(max([int(k) for k in exercises.keys()] + [0]) + 1).zfill(3) if selected_ex == "New" else selected_ex
+            next_id = (
+                str(max([int(k) for k in exercises.keys()] + [0]) + 1).zfill(3)
+                if selected_ex == "New" else selected_ex
+            )
         except Exception:
             next_id = "001" if selected_ex == "New" else selected_ex
 
         exercises[next_id] = {
             "source_text": st_text,
-            "mt_text": (mt_text.strip() or None),
+            "mt_text": (mt_text.strip() or None)
         }
         save_json(EXERCISES_FILE, exercises)
         st.success(f"Exercise saved! ID: {next_id}")
@@ -904,7 +888,7 @@ def instructor_dashboard():
                     f"Exercise {ex_id} (Word)",
                     buf,
                     file_name=f"Exercise_{ex_id}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
             except Exception:
                 st.info(f"Exercise {ex_id}: export not available (DOCX error).")
@@ -922,7 +906,7 @@ def instructor_dashboard():
                     f"Download {student_choice}'s Submissions (Word)",
                     buf,
                     file_name=f"{safe_name}_submissions.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
             except RuntimeError as e:
                 st.warning(str(e))
@@ -935,7 +919,7 @@ def instructor_dashboard():
             "Download Excel Summary",
             excel_buf,
             file_name="metrics_summary.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
         try:
@@ -965,8 +949,7 @@ def instructor_dashboard():
 
 
 # ---------------- Student Dashboard ----------------
-
-     def student_dashboard():
+def student_dashboard():
     st.title("Student Dashboard")
 
     exercises = load_json(EXERCISES_FILE)
@@ -992,7 +975,7 @@ def instructor_dashboard():
     st.subheader("Source Text")
     st.markdown(
         f"<div style='font-family:Times New Roman;font-size:12pt;'>{ex.get('source_text', '')}</div>",
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
     task_options = ["Translate"] if not ex.get("mt_text") else ["Translate", "Post-edit MT"]
@@ -1072,15 +1055,12 @@ def instructor_dashboard():
         update_leaderboard(student_name, points)
 
         st.success("Submission saved!")
-
         existing_sub = submissions[student_name][ex_id]
 
-    # If no saved submission yet, stop here
     if not existing_sub or not existing_sub.get("student_text", "").strip():
         st.info("Write your translation and click Submit first. Then AI feedback and AI Tutor will work.")
         return
 
-    # Use saved submission from this point onward
     student_text = existing_sub.get("student_text", "")
     reflection = existing_sub.get("reflection", "")
     task_type = existing_sub.get("task_type", task_type)
@@ -1134,7 +1114,7 @@ def instructor_dashboard():
                 "ex": ex_id2,
                 "BLEU": m2.get("BLEU"),
                 "chrF++": m2.get("chrF++"),
-                "Edits": m2.get("edits", 0),
+                "Edits": m2.get("edits", 0)
             })
         if history:
             st.subheader("Progress Overview")
@@ -1184,73 +1164,6 @@ def instructor_dashboard():
         if not student_prompt.strip():
             st.warning("Please enter a prompt.")
         else:
-            system_prompt = '''
-You are an expert English-Arabic translation tutor for university students.
-Help students improve their work.
-Do not automatically complete the whole task unless explicitly requested.
-Focus on accuracy, register, idiomaticity, and cultural appropriateness.
-Keep responses clear and concise.
-You may use both English and Arabic.
-'''
-
-            user_prompt = f"""
-TASK TYPE: {task_type}
-
-SOURCE TEXT:
-{ex.get('source_text', '')}
-
-MT OUTPUT:
-{ex.get('mt_text', '') or '(none)'}
-
-STUDENT SUBMISSION:
-{student_text}
-
-STUDENT QUESTION:
-{student_prompt}
-"""
-
-            with st.spinner("Requesting AI response..."):
-                ai_text = ask_ai_tutor(system_prompt, user_prompt)
-
-            if ai_text:
-                st.markdown("### AI Tutor Response")
-                st.write(ai_text)
-            else:
-                st.error("AI call returned no text. Check API key, model name, and OpenAI package version.")   
-     
-    show_leaderboard()
-
-    st.subheader("Optional AI Feedback (experimental)")
-    if st.button("Get AI feedback on your submission"):
-        prompt = build_ai_feedback_prompt(
-            ex.get("source_text", ""),
-            ex.get("mt_text", "") or "",
-            student_text,
-            task_type,
-        )
-        with st.spinner("Requesting AI feedback..."):
-            ai_text = generate_ai_feedback(prompt)
-        if ai_text:
-            st.markdown("### AI feedback / suggestion")
-            st.write(ai_text)
-        else:
-            st.warning(
-                "AI feedback is not configured or temporarily unavailable.\n\n"
-                "To enable it, set OPENAI_API_KEY (for ChatGPT) or HF_API_TOKEN (for Hugging Face)."
-            )
-
-    st.subheader("AI Tutor Chat")
-    student_prompt = st.text_area(
-        "Ask the AI tutor a question about your translation",
-        height=120,
-        placeholder="Example: Is my Arabic too literal? Suggest 2 more idiomatic options for the first sentence.",
-        key=f"ai_tutor_prompt_{student_name}_{ex_id}",
-    )
-
-    if st.button("Ask AI Tutor"):
-        if not student_prompt.strip():
-            st.warning("Please enter a prompt.")
-        else:
             system_prompt = """
 You are an expert English-Arabic translation tutor for university students.
 Help students improve their work.
@@ -1275,6 +1188,7 @@ STUDENT SUBMISSION:
 STUDENT QUESTION:
 {student_prompt}
 """
+
             with st.spinner("Requesting AI response..."):
                 ai_text = ask_ai_tutor(system_prompt, user_prompt)
 
@@ -1282,7 +1196,7 @@ STUDENT QUESTION:
                 st.markdown("### AI Tutor Response")
                 st.write(ai_text)
             else:
-                st.warning("AI is not configured. Add OPENAI_API_KEY to Streamlit secrets.")
+                st.error("AI call returned no text. Check API key, model name, and OpenAI package version.")
 
 
 # ---------------- Localisation Lab ----------------
@@ -1297,7 +1211,7 @@ def localisation_lab():
         "Localisation mode",
         ["Student view", "Instructor (manage sticker/text/image tasks)"],
         index=0,
-        key="loc_mode",
+        key="loc_mode"
     )
 
     if mode == "Instructor (manage sticker/text/image tasks)":
@@ -1383,7 +1297,13 @@ def localisation_lab():
         st.write(f"• Characters Typed: {keystrokes}")
 
         extra = quick_linguistic_hints(source_text, main_text)
-        feedback_msgs = generate_feedback(metrics, "Localisation", source_text, main_text, extra_hints=extra)
+        feedback_msgs = generate_feedback(
+            metrics,
+            "Localisation",
+            source_text,
+            main_text,
+            extra_hints=extra,
+        )
 
         st.subheader("Adaptive Feedback")
         if feedback_msgs:
@@ -1431,15 +1351,21 @@ def localisation_lab():
 def main():
     st.set_page_config(page_title="Translation Lab (EduApp)", layout="wide")
     st.sidebar.title("Navigation")
-    st.sidebar.info(f"Loaded: {THIS_FILE}\n\nLast modified: {LAST_EDIT:%Y-%m-%d %H:%M:%S}")
+    st.sidebar.info(
+        f"Loaded: {THIS_FILE}\n\nLast modified: {LAST_EDIT:%Y-%m-%d %H:%M:%S}"
+    )
 
     st.markdown(
         "<div style='padding:8px;border:1px solid #ddd;border-radius:8px;background:#f7f9ff'>"
         "<b>EduApp – Build:</b> 2025-11-10 v4 (translation + localisation lab + AI feedback)</div>",
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
-    section = st.sidebar.radio("Module", ["Core Translation Lab", "Localisation Lab"], index=0)
+    section = st.sidebar.radio(
+        "Module",
+        ["Core Translation Lab", "Localisation Lab"],
+        index=0
+    )
 
     if section == "Localisation Lab":
         localisation_lab()
