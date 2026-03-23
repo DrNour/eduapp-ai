@@ -1,0 +1,8 @@
+streamlit
+pandas
+python-docx
+openpyxl
+openai>=1.0.0
+sacrebleu
+bert-score
+matplotlib
