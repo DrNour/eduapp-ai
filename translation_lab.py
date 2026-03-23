@@ -69,9 +69,28 @@ def _env(name, default=""):
     return os.getenv(name, default)
 
 
+_def _env(name, default=""):
+    return os.getenv(name, default)
+
+
 _INSTRUCTOR_PLAIN = _env("INSTRUCTOR_PASSWORD_PLAIN", "")
 _INSTRUCTOR_SHA256 = _env("INSTRUCTOR_PASSWORD_SHA256", "")
 _INSTRUCTOR_DEV_MODE = _env("INSTRUCTOR_DEV_MODE", "0") == "1"
+_FALLBACK_PLAIN = "admin123"  # used only in dev mode
+
+
+def check_password(typed: str) -> bool:
+    try:
+        if _INSTRUCTOR_SHA256:
+            h = hashlib.sha256(typed.encode("utf-8")).hexdigest()
+            return h == _INSTRUCTOR_SHA256
+        if _INSTRUCTOR_PLAIN:
+            return typed == _INSTRUCTOR_PLAIN
+        if _INSTRUCTOR_DEV_MODE:
+            return typed == _FALLBACK_PLAIN
+        return False
+    except Exception:
+        return False  # never crash on login
 _FALLBACK_PLAIN = "admin123"
 
 
