@@ -1042,9 +1042,11 @@ def student_dashboard():
         }
         save_json(SUBMISSIONS_FILE, submissions)
         try:
+            try:
     append_submission(student_name, ex_id, submissions[student_name][ex_id])
-      except Exception:
-         pass
+except Exception:
+    pass
+    
 
         points = 0
         try:
