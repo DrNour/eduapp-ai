@@ -55,6 +55,7 @@ DATA_DIR.mkdir(exist_ok=True)
 EXERCISES_FILE = DATA_DIR / "exercises.json"
 SUBMISSIONS_FILE = DATA_DIR / "submissions.json"
 LEADERBOARD_FILE = DATA_DIR / "leaderboard.json"
+SUBMISSION_LOG_FILE = DATA_DIR / "submission_log.json"
 
 LOC_STICKERS_FILE = DATA_DIR / "loc_stickers.json"
 STICKER_IMG_DIR = DATA_DIR / "stickers"
@@ -80,6 +81,27 @@ def save_json(file: Path, data):
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
         tmp.replace(file)
+
+
+def append_submission(student_name: str, ex_id: str, submission_data: dict):
+    """
+    Optional append-only submission log for audit/history.
+    Safe no-op style helper to avoid NameError if called.
+    """
+    try:
+        log_data = load_json(SUBMISSION_LOG_FILE)
+        if not isinstance(log_data, list):
+            log_data = []
+
+        log_data.append({
+            "student_name": student_name,
+            "exercise_id": ex_id,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "submission": submission_data,
+        })
+        save_json(SUBMISSION_LOG_FILE, log_data)
+    except Exception:
+        pass
 
 
 # ---------------- Secrets / Auth ----------------
@@ -164,6 +186,7 @@ def compute_edit_details(mt_text: str, student_text: str) -> Tuple[int, int, int
             deletions += (i2 - i1)
         elif tag == "replace":
             replacements += max(i2 - i1, j2 - j1)
+
     total_edits = additions + deletions + replacements
     return additions, deletions, total_edits
 
@@ -191,8 +214,8 @@ def evaluate_translation(student_text, mt_text=None, reference=None, task_type="
             chrf = None
         try:
             if bertscore_score:
-                P, R, F1 = bertscore_score([student_text], [reference], lang="en")
-                bert_f1 = float(F1.mean().item())
+                _, _, f1 = bertscore_score([student_text], [reference], lang="en")
+                bert_f1 = float(f1.mean().item())
         except Exception:
             bert_f1 = None
 
@@ -203,7 +226,7 @@ def evaluate_translation(student_text, mt_text=None, reference=None, task_type="
         "BERTScore_F1": None if bert_f1 is None else round(bert_f1, 3),
         "additions": additions,
         "deletions": deletions,
-        "edits": edits
+        "edits": edits,
     }
 
 
@@ -260,10 +283,12 @@ def export_student_word(submissions, student_name):
     doc = Document()
     doc.add_heading(_safe_docx_text(f"Student: {student_name}"), 0)
     subs = submissions.get(student_name, {})
+
     for ex_id, sub in subs.items():
         doc.add_heading(_safe_docx_text(f"Exercise {ex_id}"), level=1)
         doc.add_paragraph("Source Text:")
         doc.add_paragraph(_safe_docx_text(sub.get("source_text", "")))
+
         if sub.get("mt_text"):
             doc.add_paragraph("MT Output:")
             doc.add_paragraph(_safe_docx_text(sub.get("mt_text", "")))
@@ -281,9 +306,11 @@ def export_student_word(submissions, student_name):
         doc.add_paragraph(_safe_docx_text(f"Task Type: {sub.get('task_type', '')}"))
         doc.add_paragraph(_safe_docx_text(f"Time Spent: {sub.get('time_spent_sec', 0):.2f} sec"))
         doc.add_paragraph(_safe_docx_text(f"Characters (not keystrokes): {sub.get('keystrokes', 0)}"))
+
         if sub.get("reflection"):
             doc.add_paragraph("Reflection:")
             doc.add_paragraph(_safe_docx_text(sub.get("reflection")))
+
         doc.add_paragraph("---")
 
     buf = BytesIO()
@@ -314,8 +341,9 @@ def export_summary_excel(submissions):
                 "Deletions": m.get("deletions"),
                 "Edits": m.get("edits"),
                 "Time Spent (s)": sub.get("time_spent_sec", 0),
-                "Characters Typed": sub.get("keystrokes", 0)
+                "Characters Typed": sub.get("keystrokes", 0),
             })
+
     df = pd.DataFrame(rows)
     buf = BytesIO()
     df.to_excel(buf, index=False)
@@ -395,7 +423,7 @@ def localisation_sticker_manager():
         instructions = st.text_area(
             "Instructions for students (what to do with this text / image)",
             value=default_instr,
-            height=120
+            height=120,
         )
 
         st.write("Sticker / image (choose either URL or upload, both optional):")
@@ -453,7 +481,7 @@ def localisation_sticker_manager():
             "image_type": image_type,
             "image_path": image_path,
             "image_url": image_url_final,
-            "created_at": datetime.datetime.now().isoformat()
+            "created_at": datetime.datetime.now().isoformat(),
         }
         save_json(LOC_STICKERS_FILE, loc_stickers)
         st.success(f"Task {task_id} saved.")
@@ -466,19 +494,19 @@ def localisation_sticker_manager():
 
 # ---------------- Optional AI exercise generator ----------------
 def ai_generate_text(prompt):
-    HF_TOKEN = get_secret("HF_API_TOKEN", "")
-    if not HF_TOKEN:
+    hf_token = get_secret("HF_API_TOKEN", "")
+    if not hf_token:
         return None
 
     try:
         import requests
-        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        headers = {"Authorization": f"Bearer {hf_token}"}
         payload = {"inputs": prompt}
         response = requests.post(
             "https://api-inference.huggingface.co/models/gpt2",
             headers=headers,
             json=payload,
-            timeout=15
+            timeout=15,
         )
         if response.status_code == 200:
             data = response.json()
@@ -496,12 +524,13 @@ _AR_LETTERS = r"\u0600-\u06FF"
 def _tokenize_words(text: str):
     return re.findall(
         r"[A-Za-z" + _AR_LETTERS + r"]+[’'\-]?[A-Za-z" + _AR_LETTERS + r"]+|\d+(?:[.,]\d+)?",
-        text
+        text,
     )
 
 
 def _likely_terms(source_text: str):
     terms = set()
+
     for q in re.findall(r"[\"“”‘’'`«»](.+?)[\"“”‘’'`«»]", source_text):
         for w in _tokenize_words(q):
             if len(w) >= 3:
@@ -516,6 +545,7 @@ def _likely_terms(source_text: str):
             terms.add(w)
         elif re.match(r"[" + _AR_LETTERS + r"]{4,}$", w):
             terms.add(w)
+
     return terms
 
 
@@ -538,16 +568,18 @@ def quick_linguistic_hints(source_text: str, student_text: str):
             hints.append({
                 "rule": "numbers_missing",
                 "message": "Some figures from the source didn’t appear in your text.",
-                "evidence": f"Missing: {_short_list(missing_nums)}"
+                "evidence": f"Missing: {_short_list(missing_nums)}",
             })
 
         for sym_open, sym_close, label in [
             ("(", ")", "parentheses"),
             ("[", "]", "brackets"),
-            ("{", "}", "braces")
+            ("{", "}", "braces"),
         ]:
-            if source_text.count(sym_open) != student_text.count(sym_open) or \
-               source_text.count(sym_close) != student_text.count(sym_close):
+            if (
+                source_text.count(sym_open) != student_text.count(sym_open)
+                or source_text.count(sym_close) != student_text.count(sym_close)
+            ):
                 hints.append({
                     "rule": f"{label}_unbalanced",
                     "message": f"{label.capitalize()} look unbalanced.",
@@ -555,13 +587,14 @@ def quick_linguistic_hints(source_text: str, student_text: str):
                         f"Source {sym_open}/{sym_close}: "
                         f"{source_text.count(sym_open)}/{source_text.count(sym_close)}; "
                         f"Your text: {student_text.count(sym_open)}/{student_text.count(sym_close)}"
-                    )
+                    ),
                 })
+
         if source_text.count('"') != student_text.count('"'):
             hints.append({
                 "rule": "quotes_unbalanced",
                 "message": "Quotation marks may be unbalanced.",
-                "evidence": f"Source quotes: {source_text.count(chr(34))}; Yours: {student_text.count(chr(34))}"
+                "evidence": f"Source quotes: {source_text.count(chr(34))}; Yours: {student_text.count(chr(34))}",
             })
 
         src_terms = _likely_terms(source_text)
@@ -571,10 +604,11 @@ def quick_linguistic_hints(source_text: str, student_text: str):
             hints.append({
                 "rule": "terms_missing",
                 "message": "Some key terms/names from the source weren’t reflected.",
-                "evidence": f"Examples: {_short_list(missing_terms)}"
+                "evidence": f"Examples: {_short_list(missing_terms)}",
             })
     except Exception:
         pass
+
     return hints
 
 
@@ -593,13 +627,13 @@ def generate_feedback(metrics: dict, task_type: str, source_text: str, student_t
             msgs.append((
                 "edits_none",
                 "No edits were applied to the MT output.",
-                "Review the MT carefully—critical errors may remain."
+                "Review the MT carefully—critical errors may remain.",
             ))
         elif edits > 20:
             msgs.append((
                 "edits_many",
                 f"High edit volume detected: {edits} edits (additions {adds}, deletions {dels}).",
-                "Prioritize adequacy/accuracy first; avoid cosmetic rephrasing that doesn’t fix meaning."
+                "Prioritize adequacy/accuracy first; avoid cosmetic rephrasing that doesn’t fix meaning.",
             ))
 
     if lr is not None:
@@ -607,13 +641,13 @@ def generate_feedback(metrics: dict, task_type: str, source_text: str, student_t
             msgs.append((
                 "len_low",
                 f"Length ratio is {lr:.2f} (target ~0.90–1.20).",
-                "Your translation may be over-compressed—recheck for omitted content."
+                "Your translation may be over-compressed—recheck for omitted content.",
             ))
         elif lr > 1.30:
             msgs.append((
                 "len_high",
                 f"Length ratio is {lr:.2f} (target ~0.90–1.20).",
-                "Consider concision—trim redundancy and literal padding."
+                "Consider concision—trim redundancy and literal padding.",
             ))
 
     if bleu is not None and chrf is not None:
@@ -621,19 +655,19 @@ def generate_feedback(metrics: dict, task_type: str, source_text: str, student_t
             msgs.append((
                 "acc_low_flu_ok",
                 f"chrF++ is {chrf:.1f} (fluency ok) but BLEU is {bleu:.1f} (accuracy lagging).",
-                "Revisit terminology and key meaning units; cross-check against the source."
+                "Revisit terminology and key meaning units; cross-check against the source.",
             ))
         elif bleu >= 30 and chrf < 50:
             msgs.append((
                 "flu_low_acc_ok",
                 f"BLEU is {bleu:.1f} (accuracy acceptable) but chrF++ is {chrf:.1f} (fluency weak).",
-                "Polish cohesion and flow—simplify long clauses and connectors."
+                "Polish cohesion and flow—simplify long clauses and connectors.",
             ))
-        elif bleu is not None and bleu < 20:
+        elif bleu < 20:
             msgs.append((
                 "both_low",
                 f"BLEU is {bleu:.1f}.",
-                "Start with adequacy: ensure all propositions are conveyed before stylistic edits."
+                "Start with adequacy: ensure all propositions are conveyed before stylistic edits.",
             ))
 
     if extra_hints:
@@ -655,6 +689,7 @@ def generate_feedback(metrics: dict, task_type: str, source_text: str, student_t
             final.append(f"• {text}")
         if len(final) >= 4:
             break
+
     return final
 
 
@@ -769,6 +804,7 @@ def generate_ai_feedback(prompt: str):
 def instructor_dashboard():
     st.title("Instructor Dashboard")
     password = st.text_input("Enter instructor password", type="password")
+
     if not check_password(password):
         if not has_instructor_auth_config():
             st.warning(
@@ -847,7 +883,7 @@ def instructor_dashboard():
 
         exercises[next_id] = {
             "source_text": st_text,
-            "mt_text": (mt_text.strip() or None)
+            "mt_text": (mt_text.strip() or None),
         }
         save_json(EXERCISES_FILE, exercises)
         st.success(f"Exercise saved! ID: {next_id}")
@@ -862,10 +898,12 @@ def instructor_dashboard():
         ai_text = ai_generate_text(prompt)
         new_text = ai_text if ai_text else f"This is AI-generated exercise {random.randint(1, 1000)}."
         new_mt = f"MT output for exercise {random.randint(1, 1000)}."
+
         try:
             next_id = str(max([int(k) for k in exercises.keys()] + [0]) + 1).zfill(3)
         except Exception:
             next_id = "001"
+
         exercises[next_id] = {"source_text": new_text, "mt_text": new_mt}
         save_json(EXERCISES_FILE, exercises)
         st.success(f"Exercise saved as ID {next_id}")
@@ -888,7 +926,7 @@ def instructor_dashboard():
                     f"Exercise {ex_id} (Word)",
                     buf,
                     file_name=f"Exercise_{ex_id}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
             except Exception:
                 st.info(f"Exercise {ex_id}: export not available (DOCX error).")
@@ -906,7 +944,7 @@ def instructor_dashboard():
                     f"Download {student_choice}'s Submissions (Word)",
                     buf,
                     file_name=f"{safe_name}_submissions.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
             except RuntimeError as e:
                 st.warning(str(e))
@@ -914,13 +952,16 @@ def instructor_dashboard():
                 st.error("Unexpected error while generating the Word report.")
 
         st.subheader("Download Metrics Summary (Excel)")
-        excel_buf = export_summary_excel(submissions)
-        st.download_button(
-            "Download Excel Summary",
-            excel_buf,
-            file_name="metrics_summary.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        try:
+            excel_buf = export_summary_excel(submissions)
+            st.download_button(
+                "Download Excel Summary",
+                excel_buf,
+                file_name="metrics_summary.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception as e:
+            st.error(f"Excel export failed: {e}")
 
         try:
             st.subheader("Class Snapshot")
@@ -936,6 +977,7 @@ def instructor_dashboard():
                 if vals:
                     mean_val = round(sum(vals) / max(1, len(vals)), 2)
                     rows.append({"Exercise": ex_id2, "chrF++ mean": mean_val, "n": len(vals)})
+
             if rows:
                 st.dataframe(pd.DataFrame(rows))
             else:
@@ -958,6 +1000,9 @@ def student_dashboard():
         return
 
     submissions = load_json(SUBMISSIONS_FILE)
+    if not isinstance(submissions, dict):
+        submissions = {}
+
     student_name = st.text_input("Enter your name")
     if not student_name:
         return
@@ -975,7 +1020,7 @@ def student_dashboard():
     st.subheader("Source Text")
     st.markdown(
         f"<div style='font-family:Times New Roman;font-size:12pt;'>{ex.get('source_text', '')}</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     task_options = ["Translate"] if not ex.get("mt_text") else ["Translate", "Post-edit MT"]
@@ -988,7 +1033,7 @@ def student_dashboard():
         "Task Type",
         task_options,
         horizontal=True,
-        index=task_options.index(default_task_type)
+        index=task_options.index(default_task_type),
     )
 
     if existing_sub.get("student_text"):
@@ -1000,6 +1045,7 @@ def student_dashboard():
 
     start_key = f"start_time_{student_name}_{ex_id}"
     keys_key = f"chars_{student_name}_{ex_id}"
+
     if start_key not in st.session_state:
         st.session_state[start_key] = time.time()
     if keys_key not in st.session_state:
@@ -1009,12 +1055,12 @@ def student_dashboard():
         student_text = st.text_area(
             "Type your translation / post-edit here",
             value=initial_text,
-            height=300
+            height=300,
         )
         reflection = st.text_area(
             "Brief reflection (what changed / why?)",
             value=default_reflection,
-            height=80
+            height=80,
         )
         submitted = st.form_submit_button("Submit")
 
@@ -1041,12 +1087,8 @@ def student_dashboard():
             "reflection": reflection,
         }
         save_json(SUBMISSIONS_FILE, submissions)
-        try:
-            try:
-    append_submission(student_name, ex_id, submissions[student_name][ex_id])
-except Exception:
-    pass
-    
+
+        append_submission(student_name, ex_id, submissions[student_name][ex_id])
 
         points = 0
         try:
@@ -1058,8 +1100,8 @@ except Exception:
                 points += max(0, 10 - int(metrics["edits"]))
         except Exception:
             pass
-        update_leaderboard(student_name, points)
 
+        update_leaderboard(student_name, points)
         st.success("Submission saved!")
         existing_sub = submissions[student_name][ex_id]
 
@@ -1068,7 +1110,6 @@ except Exception:
         return
 
     student_text = existing_sub.get("student_text", "")
-    reflection = existing_sub.get("reflection", "")
     task_type = existing_sub.get("task_type", task_type)
     time_spent = existing_sub.get("time_spent_sec", 0)
     st.session_state[keys_key] = existing_sub.get("keystrokes", len(student_text))
@@ -1096,7 +1137,7 @@ except Exception:
         task_type,
         ex.get("source_text", ""),
         student_text,
-        extra
+        extra,
     )
 
     st.subheader("Adaptive Feedback (metrics-based)")
@@ -1120,17 +1161,20 @@ except Exception:
                 "ex": ex_id2,
                 "BLEU": m2.get("BLEU"),
                 "chrF++": m2.get("chrF++"),
-                "Edits": m2.get("edits", 0)
+                "Edits": m2.get("edits", 0),
             })
+
         if history:
             st.subheader("Progress Overview")
             df_hist = pd.DataFrame(history)
+
             try:
                 if not df_hist.empty:
                     df_trend = df_hist.set_index("ex")[["BLEU", "chrF++"]]
                     st.line_chart(df_trend)
             except Exception:
                 pass
+
             try:
                 df_edits = df_hist.set_index("ex")[["Edits"]]
                 st.bar_chart(df_edits)
@@ -1217,7 +1261,7 @@ def localisation_lab():
         "Localisation mode",
         ["Student view", "Instructor (manage sticker/text/image tasks)"],
         index=0,
-        key="loc_mode"
+        key="loc_mode",
     )
 
     if mode == "Instructor (manage sticker/text/image tasks)":
@@ -1230,6 +1274,9 @@ def localisation_lab():
         return
 
     submissions = load_json(SUBMISSIONS_FILE)
+    if not isinstance(submissions, dict):
+        submissions = {}
+
     if student_name not in submissions:
         submissions[student_name] = {}
 
@@ -1256,8 +1303,8 @@ def localisation_lab():
         start_key = f"loc_start_{student_name}_{ex_id}"
         if start_key not in st.session_state:
             st.session_state[start_key] = time.time()
-        time_spent = time.time() - st.session_state[start_key]
 
+        time_spent = time.time() - st.session_state[start_key]
         keystrokes = len(main_text)
 
         metrics = evaluate_translation(
@@ -1287,6 +1334,7 @@ def localisation_lab():
                 points += 5
         except Exception:
             pass
+
         update_leaderboard(student_name, points)
 
         st.success("Localisation submission saved and leaderboard updated!")
@@ -1326,6 +1374,7 @@ def localisation_lab():
             prompt = build_ai_feedback_prompt(source_text, "", main_text, "Localisation")
             with st.spinner("Requesting AI feedback..."):
                 ai_text = generate_ai_feedback(prompt)
+
             if ai_text:
                 st.markdown("### AI feedback / suggestion (Localisation)")
                 st.write(ai_text)
@@ -1345,12 +1394,117 @@ def localisation_lab():
         "7️⃣ Strategy & Theory Reflection": "LOC_7",
         "🎨 Sticker / text / image task (from instructor)": "LOC_STICKER",
     }
+
     current_ex_id = ex_id_map.get(exercise, "LOC_STICKER")
     start_key = f"loc_start_{student_name}_{current_ex_id}"
     if start_key not in st.session_state:
         st.session_state[start_key] = time.time()
 
-    st.info("Localisation exercise functions omitted here for brevity; plug in your existing ones.")
+    if exercise == "1️⃣ Translation vs Localisation":
+        st.subheader("Translation vs Localisation")
+        source_text = "Welcome to our app! Enjoy lightning-fast delivery and unbeatable deals every Friday."
+        st.write("Decide how you would localise this text for Arabic users.")
+        main_text = st.text_area("Your localised version", key="loc1_main", height=180)
+        reflection = st.text_area("Reflection", key="loc1_reflect", height=100)
+        if st.button("Save this task", key="loc1_save"):
+            save_loc_submission("LOC_1", source_text, main_text, reflection)
+
+    elif exercise == "2️⃣ Cultural Adaptation in Advertising":
+        st.subheader("Cultural Adaptation in Advertising")
+        source_text = "Grab your Halloween special now and trick-or-treat yourself with 50% off!"
+        st.write("Adapt this for an Arabic-speaking audience while keeping the persuasive purpose.")
+        main_text = st.text_area("Your adapted version", key="loc2_main", height=180)
+        reflection = st.text_area("Reflection", key="loc2_reflect", height=100)
+        if st.button("Save this task", key="loc2_save"):
+            save_loc_submission("LOC_2", source_text, main_text, reflection)
+
+    elif exercise == "3️⃣ Conventions: Dates, Units, Currency":
+        st.subheader("Conventions: Dates, Units, Currency")
+        source_text = "Offer valid until 12/31/2025. Free shipping on orders above $75. Package weight: 3.5 lbs."
+        st.write("Rewrite/localise the text using conventions suitable for Arabic readers.")
+        main_text = st.text_area("Your localised version", key="loc3_main", height=180)
+        reflection = st.text_area("Reflection", key="loc3_reflect", height=100)
+        if st.button("Save this task", key="loc3_save"):
+            save_loc_submission("LOC_3", source_text, main_text, reflection)
+
+    elif exercise == "4️⃣ Tone & Website/App UX":
+        st.subheader("Tone & Website/App UX")
+        source_text = "Oops! Something went wrong. Please try again later."
+        st.write("Localise this microcopy for a polished Arabic app experience.")
+        main_text = st.text_area("Your UX-localised version", key="loc4_main", height=180)
+        reflection = st.text_area("Reflection", key="loc4_reflect", height=100)
+        if st.button("Save this task", key="loc4_save"):
+            save_loc_submission("LOC_4", source_text, main_text, reflection)
+
+    elif exercise == "5️⃣ Post-editing: Error Detection":
+        st.subheader("Post-editing: Error Detection")
+        source_text = "The conference starts on Monday at 9:30 a.m. in Hall B."
+        mt_output = "يبدأ المؤتمر يوم الإثنين الساعة 9:30 مساءً في القاعة ب."
+        st.write("Source text:")
+        st.write(source_text)
+        st.write("MT output:")
+        st.write(mt_output)
+        st.write("Correct the MT output.")
+        main_text = st.text_area("Your post-edited version", value=mt_output, key="loc5_main", height=180)
+        reflection = st.text_area("Reflection", key="loc5_reflect", height=100)
+        if st.button("Save this task", key="loc5_save"):
+            save_loc_submission("LOC_5", source_text, main_text, reflection)
+
+    elif exercise == "6️⃣ App Store Description":
+        st.subheader("App Store Description")
+        source_text = (
+            "Track your habits, build routines, and stay motivated with daily reminders "
+            "and beautifully designed progress charts."
+        )
+        st.write("Produce a natural Arabic app-store style description.")
+        main_text = st.text_area("Your localised app description", key="loc6_main", height=180)
+        reflection = st.text_area("Reflection", key="loc6_reflect", height=100)
+        if st.button("Save this task", key="loc6_save"):
+            save_loc_submission("LOC_6", source_text, main_text, reflection)
+
+    elif exercise == "7️⃣ Strategy & Theory Reflection":
+        st.subheader("Strategy & Theory Reflection")
+        source_text = "Reflect on the difference between translation and localisation in 1–2 short paragraphs."
+        st.write(source_text)
+        main_text = st.text_area("Your reflection", key="loc7_main", height=220)
+        reflection = st.text_area("Optional note on your strategy", key="loc7_reflect", height=100)
+        if st.button("Save this task", key="loc7_save"):
+            save_loc_submission("LOC_7", source_text, main_text, reflection)
+
+    else:
+        st.subheader("🎨 Sticker / text / image task")
+        loc_stickers = load_json(LOC_STICKERS_FILE)
+        if not loc_stickers:
+            st.info("No sticker/text/image task has been published by the instructor yet.")
+            return
+
+        task_ids = sorted(loc_stickers.keys())
+        chosen_task = st.selectbox("Choose instructor task", task_ids, key="sticker_task_select")
+        task = loc_stickers[chosen_task]
+
+        st.markdown(f"**Title:** {task.get('title', '')}")
+        if task.get("instructions"):
+            st.markdown("**Instructions:**")
+            st.write(task.get("instructions"))
+
+        source_text = task.get("content_text", "")
+
+        if source_text:
+            st.markdown("**Text to localise:**")
+            st.write(source_text)
+
+        if task.get("image_type") == "uploaded":
+            img_path = task.get("image_path", "")
+            if img_path and Path(img_path).exists():
+                st.image(img_path)
+        elif task.get("image_type") == "url":
+            st.image(task.get("image_url", ""))
+
+        main_text = st.text_area("Your localisation / analysis", key="loc_sticker_main", height=220)
+        reflection = st.text_area("Reflection", key="loc_sticker_reflect", height=100)
+
+        if st.button("Save this task", key="loc_sticker_save"):
+            save_loc_submission(f"LOC_STICKER_{chosen_task}", source_text or task.get("title", ""), main_text, reflection)
 
 
 # ---------------- Main ----------------
@@ -1364,13 +1518,13 @@ def main():
     st.markdown(
         "<div style='padding:8px;border:1px solid #ddd;border-radius:8px;background:#f7f9ff'>"
         "<b>EduApp – Build:</b> 2025-11-10 v4 (translation + localisation lab + AI feedback)</div>",
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
     section = st.sidebar.radio(
         "Module",
         ["Core Translation Lab", "Localisation Lab"],
-        index=0
+        index=0,
     )
 
     if section == "Localisation Lab":
