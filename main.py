@@ -1,4 +1,5 @@
 import streamlit as st
+from mqm_feature import mqm_rating_form
 from translation_lab import instructor_dashboard, student_dashboard
 from localisation_lab import localisation_lab
 
