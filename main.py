@@ -2,13 +2,6 @@ import streamlit as st
 from mqm_feature import mqm_rating_form
 from translation_lab import instructor_dashboard, student_dashboard
 from localisation_lab import localisation_lab
-mqm_rating_form(
-    student_name,
-    ex_id,
-    submission,
-    ask_ai_tutor  # pass your AI function
-)
-
 
 def main():
     st.set_page_config(page_title="Translation Lab (EduApp)", layout="wide")
