@@ -16,7 +16,7 @@ import pandas as pd
 from docx import Document
 from docx.shared import RGBColor
 
-# Optional metrics deps (graceful fallback if missing)
+# Optional metrics deps
 try:
     import sacrebleu
 except Exception:
@@ -30,15 +30,16 @@ except Exception:
 # Optional plotting
 try:
     import matplotlib.pyplot as plt  # noqa: F401
-    _HAVE_MPL = True
+    HAVE_MPL = True
 except Exception:
-    _HAVE_MPL = False
+    HAVE_MPL = False
 
 # Optional OpenAI
 try:
     import openai
 except Exception:
     openai = None
+
 
 # ---------------- Proof-of-life banner ----------------
 try:
@@ -47,6 +48,7 @@ try:
 except Exception:
     THIS_FILE = "interactive_session"
     LAST_EDIT = datetime.datetime.now()
+
 
 # ---------------- Storage ----------------
 DATA_DIR = Path("./data")
@@ -61,9 +63,13 @@ LOC_STICKERS_FILE = DATA_DIR / "loc_stickers.json"
 STICKER_IMG_DIR = DATA_DIR / "stickers"
 STICKER_IMG_DIR.mkdir(exist_ok=True)
 
+MQM_FILE = DATA_DIR / "mqm_assessments.json"
+MQM_CONFIG_FILE = DATA_DIR / "mqm_config.json"
+
 _lock = threading.Lock()
 
 
+# ---------------- JSON helpers ----------------
 def load_json(file: Path):
     file = Path(file)
     if file.exists():
@@ -84,15 +90,10 @@ def save_json(file: Path, data):
 
 
 def append_submission(student_name: str, ex_id: str, submission_data: dict):
-    """
-    Optional append-only submission log for audit/history.
-    Safe no-op style helper to avoid NameError if called.
-    """
     try:
         log_data = load_json(SUBMISSION_LOG_FILE)
         if not isinstance(log_data, list):
             log_data = []
-
         log_data.append({
             "student_name": student_name,
             "exercise_id": ex_id,
@@ -117,7 +118,7 @@ def get_secret(name, default=""):
     return default
 
 
-_FALLBACK_PLAIN = "admin123"
+FALLBACK_PLAIN = "admin123"
 
 
 def check_password(typed: str) -> bool:
@@ -134,7 +135,7 @@ def check_password(typed: str) -> bool:
             return typed == instructor_plain
 
         if instructor_dev_mode:
-            return typed == _FALLBACK_PLAIN
+            return typed == FALLBACK_PLAIN
 
         return False
     except Exception:
@@ -166,11 +167,11 @@ def get_ai_backend_status():
 
 
 # ---------------- Tokenization & Edit Helpers ----------------
-_token_re = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 
 
 def _tokenize(s: str) -> List[str]:
-    return _token_re.findall(s or "")
+    return TOKEN_RE.findall(s or "")
 
 
 def compute_edit_details(mt_text: str, student_text: str) -> Tuple[int, int, int]:
@@ -230,6 +231,192 @@ def evaluate_translation(student_text, mt_text=None, reference=None, task_type="
     }
 
 
+# ---------------- MQM ----------------
+def load_mqm_config():
+    cfg = load_json(MQM_CONFIG_FILE)
+    if not cfg:
+        cfg = {
+            "categories": [
+                "Accuracy",
+                "Fluency",
+                "Terminology",
+                "Style",
+                "Locale convention",
+                "Design / markup",
+                "Omission",
+                "Addition",
+                "Mistranslation",
+                "Grammar",
+                "Spelling / punctuation",
+            ],
+            "severity_weights": {
+                "minor": 1,
+                "major": 5,
+                "critical": 10,
+            },
+        }
+        save_json(MQM_CONFIG_FILE, cfg)
+    return cfg
+
+
+def load_mqm_assessments():
+    data = load_json(MQM_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def save_mqm_assessment(student_name: str, ex_id: str, assessment: dict):
+    data = load_mqm_assessments()
+    if student_name not in data:
+        data[student_name] = {}
+    data[student_name][ex_id] = assessment
+    save_json(MQM_FILE, data)
+
+
+def get_mqm_assessment(student_name: str, ex_id: str):
+    data = load_mqm_assessments()
+    return data.get(student_name, {}).get(ex_id, {})
+
+
+def compute_mqm_score(error_list, severity_weights):
+    total_penalty = 0
+    per_category = {}
+    per_severity = {"minor": 0, "major": 0, "critical": 0}
+
+    for err in error_list:
+        sev = (err.get("severity") or "").strip().lower()
+        cat = (err.get("category") or "").strip() or "Unspecified"
+        penalty = severity_weights.get(sev, 0)
+
+        total_penalty += penalty
+
+        per_category.setdefault(cat, {"count": 0, "penalty": 0})
+        per_category[cat]["count"] += 1
+        per_category[cat]["penalty"] += penalty
+
+        if sev in per_severity:
+            per_severity[sev] += 1
+        else:
+            per_severity[sev] = per_severity.get(sev, 0) + 1
+
+    score = max(0, 100 - total_penalty)
+    return {
+        "penalty": total_penalty,
+        "score": score,
+        "error_count": len(error_list),
+        "per_category": per_category,
+        "per_severity": per_severity,
+    }
+
+
+def mqm_errors_to_df(mqm_data: dict) -> pd.DataFrame:
+    errors = mqm_data.get("errors", [])
+    rows = []
+    for i, e in enumerate(errors, start=1):
+        rows.append({
+            "#": i,
+            "Category": e.get("category", ""),
+            "Severity": e.get("severity", ""),
+            "Span / Issue": e.get("span", ""),
+            "Comment": e.get("comment", ""),
+        })
+    return pd.DataFrame(rows)
+
+
+def mqm_category_summary_df(mqm_data: dict) -> pd.DataFrame:
+    per_category = mqm_data.get("per_category", {})
+    rows = []
+    for cat, vals in per_category.items():
+        rows.append({
+            "Category": cat,
+            "Error Count": vals.get("count", 0),
+            "Penalty": vals.get("penalty", 0),
+        })
+    if not rows:
+        return pd.DataFrame(columns=["Category", "Error Count", "Penalty"])
+    return pd.DataFrame(rows).sort_values(["Penalty", "Error Count"], ascending=[False, False])
+
+
+def render_mqm_summary(mqm_data: dict):
+    if not mqm_data:
+        st.info("No MQM assessment available yet.")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("MQM Score", mqm_data.get("score", "—"))
+    with c2:
+        st.metric("MQM Penalty", mqm_data.get("penalty", "—"))
+    with c3:
+        st.metric("MQM Error Count", mqm_data.get("error_count", "—"))
+
+    cat_df = mqm_category_summary_df(mqm_data)
+    if not cat_df.empty:
+        st.markdown("**MQM Category Summary**")
+        st.dataframe(cat_df, use_container_width=True)
+
+    err_df = mqm_errors_to_df(mqm_data)
+    if not err_df.empty:
+        st.markdown("**MQM Error Log**")
+        st.dataframe(err_df, use_container_width=True)
+
+
+def build_mqm_export_rows(mqm_all: dict):
+    rows = []
+    for student, student_data in mqm_all.items():
+        for ex_id, mqm in student_data.items():
+            errors = mqm.get("errors", [])
+            if errors:
+                for idx, err in enumerate(errors, start=1):
+                    rows.append({
+                        "Student": student,
+                        "Exercise": ex_id,
+                        "MQM Score": mqm.get("score"),
+                        "MQM Penalty": mqm.get("penalty"),
+                        "MQM Error Count": mqm.get("error_count"),
+                        "Overall Comment": mqm.get("overall_comment", ""),
+                        "Error #": idx,
+                        "Category": err.get("category", ""),
+                        "Severity": err.get("severity", ""),
+                        "Span / Issue": err.get("span", ""),
+                        "Comment": err.get("comment", ""),
+                        "Assessed At": mqm.get("assessed_at", ""),
+                    })
+            else:
+                rows.append({
+                    "Student": student,
+                    "Exercise": ex_id,
+                    "MQM Score": mqm.get("score"),
+                    "MQM Penalty": mqm.get("penalty"),
+                    "MQM Error Count": mqm.get("error_count"),
+                    "Overall Comment": mqm.get("overall_comment", ""),
+                    "Error #": "",
+                    "Category": "",
+                    "Severity": "",
+                    "Span / Issue": "",
+                    "Comment": "",
+                    "Assessed At": mqm.get("assessed_at", ""),
+                })
+    return rows
+
+
+def build_mqm_overview_df(mqm_all: dict) -> pd.DataFrame:
+    rows = []
+    for student, student_data in mqm_all.items():
+        for ex_id, mqm in student_data.items():
+            rows.append({
+                "Student": student,
+                "Exercise": ex_id,
+                "MQM Score": mqm.get("score"),
+                "MQM Penalty": mqm.get("penalty"),
+                "MQM Error Count": mqm.get("error_count"),
+                "Minor Errors": mqm.get("per_severity", {}).get("minor", 0),
+                "Major Errors": mqm.get("per_severity", {}).get("major", 0),
+                "Critical Errors": mqm.get("per_severity", {}).get("critical", 0),
+                "Assessed At": mqm.get("assessed_at", ""),
+            })
+    return pd.DataFrame(rows)
+
+
 # ---------------- Track Changes ----------------
 def _join_tokens_for_display(tokens: List[str]) -> str:
     out = " ".join(tokens)
@@ -251,7 +438,7 @@ def diff_text(baseline: str, student_text: str) -> str:
     return _join_tokens_for_display(parts)
 
 
-_INVALID_XML_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+INVALID_XML_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 
 
 def _safe_docx_text(value) -> str:
@@ -259,7 +446,7 @@ def _safe_docx_text(value) -> str:
         return ""
     if not isinstance(value, str):
         value = str(value)
-    return _INVALID_XML_RE.sub("", value)
+    return INVALID_XML_RE.sub("", value)
 
 
 def add_diff_to_doc(doc: Document, baseline: str, student_text: str):
@@ -283,6 +470,7 @@ def export_student_word(submissions, student_name):
     doc = Document()
     doc.add_heading(_safe_docx_text(f"Student: {student_name}"), 0)
     subs = submissions.get(student_name, {})
+    mqm_all = load_mqm_assessments()
 
     for ex_id, sub in subs.items():
         doc.add_heading(_safe_docx_text(f"Exercise {ex_id}"), level=1)
@@ -305,7 +493,34 @@ def export_student_word(submissions, student_name):
         doc.add_paragraph(_safe_docx_text(f"Metrics: {metrics}"))
         doc.add_paragraph(_safe_docx_text(f"Task Type: {sub.get('task_type', '')}"))
         doc.add_paragraph(_safe_docx_text(f"Time Spent: {sub.get('time_spent_sec', 0):.2f} sec"))
-        doc.add_paragraph(_safe_docx_text(f"Characters (not keystrokes): {sub.get('keystrokes', 0)}"))
+        doc.add_paragraph(_safe_docx_text(f"Characters Typed: {sub.get('keystrokes', 0)}"))
+
+        mqm = mqm_all.get(student_name, {}).get(ex_id, {})
+        if mqm:
+            doc.add_paragraph("MQM Assessment:")
+            doc.add_paragraph(_safe_docx_text(f"MQM Score: {mqm.get('score', '')}"))
+            doc.add_paragraph(_safe_docx_text(f"MQM Penalty: {mqm.get('penalty', '')}"))
+            doc.add_paragraph(_safe_docx_text(f"MQM Error Count: {mqm.get('error_count', '')}"))
+
+            if mqm.get("overall_comment"):
+                doc.add_paragraph(_safe_docx_text(f"Overall Comment: {mqm.get('overall_comment', '')}"))
+
+            per_category = mqm.get("per_category", {})
+            if per_category:
+                doc.add_paragraph("MQM Category Totals:")
+                for cat, vals in per_category.items():
+                    doc.add_paragraph(_safe_docx_text(
+                        f"{cat}: count={vals.get('count', 0)}, penalty={vals.get('penalty', 0)}"
+                    ))
+
+            for err in mqm.get("errors", []):
+                line = (
+                    f"Category: {err.get('category', '')} | "
+                    f"Severity: {err.get('severity', '')} | "
+                    f"Span: {err.get('span', '')} | "
+                    f"Comment: {err.get('comment', '')}"
+                )
+                doc.add_paragraph(_safe_docx_text(line))
 
         if sub.get("reflection"):
             doc.add_paragraph("Reflection:")
@@ -314,25 +529,28 @@ def export_student_word(submissions, student_name):
         doc.add_paragraph("---")
 
     buf = BytesIO()
-    try:
-        doc.save(buf)
-    except Exception:
-        raise RuntimeError(
-            "Failed to generate Word file. Some submission text may contain unsupported characters."
-        )
+    doc.save(buf)
     buf.seek(0)
     return buf
 
 
-def export_summary_excel(submissions):
+def build_submissions_export_df(submissions):
+    mqm_all = load_mqm_assessments()
     rows = []
+
     for student, subs in submissions.items():
         for ex_id, sub in subs.items():
             m = sub.get("metrics", {})
+            mqm = mqm_all.get(student, {}).get(ex_id, {})
+
             rows.append({
                 "Student": student,
                 "Exercise": ex_id,
                 "Task Type": sub.get("task_type", ""),
+                "Source Text": sub.get("source_text", ""),
+                "MT Output": sub.get("mt_text", ""),
+                "Student Submission": sub.get("student_text", ""),
+                "Reflection": sub.get("reflection", ""),
                 "Length Ratio": m.get("length_ratio"),
                 "BLEU": m.get("BLEU"),
                 "chrF++": m.get("chrF++"),
@@ -342,18 +560,49 @@ def export_summary_excel(submissions):
                 "Edits": m.get("edits"),
                 "Time Spent (s)": sub.get("time_spent_sec", 0),
                 "Characters Typed": sub.get("keystrokes", 0),
+                "MQM Score": mqm.get("score"),
+                "MQM Penalty": mqm.get("penalty"),
+                "MQM Error Count": mqm.get("error_count"),
+                "MQM Overall Comment": mqm.get("overall_comment", ""),
             })
 
-    df = pd.DataFrame(rows)
+    return pd.DataFrame(rows)
+
+
+def build_leaderboard_df():
+    leaderboard = load_json(LEADERBOARD_FILE)
+    if not isinstance(leaderboard, dict):
+        leaderboard = {}
+    items = sorted(leaderboard.items(), key=lambda x: x[1], reverse=True)
+    return pd.DataFrame(items, columns=["Student", "Points"])
+
+
+def export_summary_excel(submissions):
+    submissions_df = build_submissions_export_df(submissions)
+    mqm_all = load_mqm_assessments()
+    mqm_df = pd.DataFrame(build_mqm_export_rows(mqm_all))
+    leaderboard_df = build_leaderboard_df()
+
     buf = BytesIO()
-    df.to_excel(buf, index=False)
+    try:
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            submissions_df.to_excel(writer, sheet_name="Submissions", index=False)
+            mqm_df.to_excel(writer, sheet_name="MQM", index=False)
+            leaderboard_df.to_excel(writer, sheet_name="Leaderboard", index=False)
+    except Exception:
+        with pd.ExcelWriter(buf) as writer:
+            submissions_df.to_excel(writer, sheet_name="Submissions", index=False)
+            mqm_df.to_excel(writer, sheet_name="MQM", index=False)
+            leaderboard_df.to_excel(writer, sheet_name="Leaderboard", index=False)
+
     buf.seek(0)
     return buf
 
 
 # ---------------- Gamification ----------------
 def load_leaderboard():
-    return load_json(LEADERBOARD_FILE)
+    data = load_json(LEADERBOARD_FILE)
+    return data if isinstance(data, dict) else {}
 
 
 def update_leaderboard(student_name, points):
@@ -389,6 +638,9 @@ def localisation_sticker_manager():
         return
 
     loc_stickers = load_json(LOC_STICKERS_FILE)
+    if not isinstance(loc_stickers, dict):
+        loc_stickers = {}
+
     sticker_ids = ["New task"] + sorted(loc_stickers.keys())
     selection = st.selectbox("Choose task", sticker_ids, key="loc_sticker_select")
 
@@ -437,6 +689,8 @@ def localisation_sticker_manager():
             delete_btn = st.form_submit_button("Delete this task")
 
     loc_stickers = load_json(LOC_STICKERS_FILE)
+    if not isinstance(loc_stickers, dict):
+        loc_stickers = {}
 
     if save_btn:
         if not title.strip() and not content_text.strip() and not image_url and not uploaded:
@@ -518,12 +772,12 @@ def ai_generate_text(prompt):
 
 
 # ---------------- Evidence-based Linguistic Hints ----------------
-_AR_LETTERS = r"\u0600-\u06FF"
+AR_LETTERS = r"\u0600-\u06FF"
 
 
 def _tokenize_words(text: str):
     return re.findall(
-        r"[A-Za-z" + _AR_LETTERS + r"]+[’'\-]?[A-Za-z" + _AR_LETTERS + r"]+|\d+(?:[.,]\d+)?",
+        r"[A-Za-z" + AR_LETTERS + r"]+[’'\-]?[A-Za-z" + AR_LETTERS + r"]+|\d+(?:[.,]\d+)?",
         text,
     )
 
@@ -543,7 +797,7 @@ def _likely_terms(source_text: str):
             terms.add(w)
         elif "-" in w or re.search(r"\d", w):
             terms.add(w)
-        elif re.match(r"[" + _AR_LETTERS + r"]{4,}$", w):
+        elif re.match(r"[" + AR_LETTERS + r"]{4,}$", w):
             terms.add(w)
 
     return terms
@@ -735,7 +989,7 @@ def ask_ai_tutor(system_prompt: str, user_prompt: str):
                         model=openai_model,
                         instructions=system_prompt,
                         input=user_prompt,
-                        max_output_tokens=700,
+                        max_output_tokens=900,
                     )
                     text = getattr(resp, "output_text", None)
                     if text:
@@ -747,13 +1001,12 @@ def ask_ai_tutor(system_prompt: str, user_prompt: str):
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt},
                         ],
-                        max_tokens=700,
-                        temperature=0.4,
+                        max_tokens=900,
+                        temperature=0.3,
                     )
                     text = resp.choices[0].message.content
                     if text:
                         return text.strip()
-
             else:
                 openai.api_key = openai_key
                 resp = openai.ChatCompletion.create(
@@ -762,13 +1015,12 @@ def ask_ai_tutor(system_prompt: str, user_prompt: str):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    max_tokens=700,
-                    temperature=0.4,
+                    max_tokens=900,
+                    temperature=0.3,
                 )
                 text = resp.choices[0].message["content"]
                 if text:
                     return text.strip()
-
         except Exception as e:
             return f"OpenAI error: {e}"
 
@@ -800,6 +1052,329 @@ def generate_ai_feedback(prompt: str):
     return ask_ai_tutor(system_prompt, prompt)
 
 
+def build_ai_mqm_prompt(source_text: str, mt_text: str, student_text: str, categories: list) -> str:
+    categories_text = ", ".join(categories)
+    mt_block = mt_text if mt_text else "(none)"
+    return f"""
+You are an expert translation quality assessor using MQM principles.
+
+Allowed MQM categories:
+{categories_text}
+
+Severity must be one of:
+minor, major, critical
+
+Task:
+Read the source text, optional MT output, and the student submission.
+Identify up to 8 likely MQM issues.
+Return ONLY valid JSON as a list of objects.
+Each object must have exactly these keys:
+category, severity, span, comment
+
+Rules:
+- category must be one of the allowed categories above
+- severity must be one of: minor, major, critical
+- span should be a short problematic segment or issue label
+- comment should be concise and specific
+- do not include markdown
+- do not include explanation outside JSON
+- if there are no clear issues, return []
+
+SOURCE TEXT:
+{source_text}
+
+MT OUTPUT:
+{mt_block}
+
+STUDENT SUBMISSION:
+{student_text}
+"""
+
+
+def parse_ai_mqm_suggestions(ai_text: str, allowed_categories: list):
+    if not ai_text:
+        return []
+
+    text = ai_text.strip()
+
+    # Try direct JSON
+    candidates = [text]
+
+    # Try extracting array block
+    match = re.search(r"(\[\s*{.*}\s*\])", text, re.DOTALL)
+    if match:
+        candidates.insert(0, match.group(1))
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+            if not isinstance(data, list):
+                continue
+
+            clean = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                category = str(item.get("category", "")).strip()
+                severity = str(item.get("severity", "")).strip().lower()
+                span = str(item.get("span", "")).strip()
+                comment = str(item.get("comment", "")).strip()
+
+                if category not in allowed_categories:
+                    continue
+                if severity not in {"minor", "major", "critical"}:
+                    continue
+                if not span and not comment:
+                    continue
+
+                clean.append({
+                    "category": category,
+                    "severity": severity,
+                    "span": span,
+                    "comment": comment,
+                })
+            return clean
+        except Exception:
+            continue
+
+    return []
+
+
+# ---------------- Instructor MQM panel ----------------
+def instructor_mqm_panel(exercises, submissions):
+    st.subheader("MQM Assessment")
+
+    cfg = load_mqm_config()
+    categories = cfg.get("categories", [])
+    severity_weights = cfg.get("severity_weights", {"minor": 1, "major": 5, "critical": 10})
+
+    with st.expander("MQM Configuration", expanded=False):
+        st.markdown("**Categories**")
+        cat_text = st.text_area(
+            "One category per line",
+            value="\n".join(categories),
+            height=180,
+            key="mqm_cat_text",
+        )
+
+        st.markdown("**Severity weights**")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            minor_w = st.number_input("Minor", min_value=0, value=int(severity_weights.get("minor", 1)), key="mqm_minor")
+        with c2:
+            major_w = st.number_input("Major", min_value=0, value=int(severity_weights.get("major", 5)), key="mqm_major")
+        with c3:
+            critical_w = st.number_input("Critical", min_value=0, value=int(severity_weights.get("critical", 10)), key="mqm_critical")
+
+        if st.button("Save MQM configuration", key="save_mqm_cfg"):
+            new_cfg = {
+                "categories": [x.strip() for x in cat_text.splitlines() if x.strip()],
+                "severity_weights": {
+                    "minor": int(minor_w),
+                    "major": int(major_w),
+                    "critical": int(critical_w),
+                },
+            }
+            save_json(MQM_CONFIG_FILE, new_cfg)
+            st.success("MQM configuration saved.")
+            cfg = new_cfg
+            categories = cfg["categories"]
+            severity_weights = cfg["severity_weights"]
+
+    if not submissions:
+        st.info("No student submissions yet for MQM assessment.")
+        return
+
+    student_names = sorted(submissions.keys())
+    selected_student = st.selectbox("Student for MQM", student_names, key="mqm_student")
+
+    student_subs = submissions.get(selected_student, {})
+    if not student_subs:
+        st.info("This student has no submissions.")
+        return
+
+    selected_ex = st.selectbox("Exercise for MQM", sorted(student_subs.keys()), key="mqm_ex")
+    sub = student_subs[selected_ex]
+
+    st.markdown("### Submission under review")
+    st.markdown("**Source text:**")
+    st.write(sub.get("source_text", ""))
+
+    if sub.get("mt_text"):
+        st.markdown("**MT output:**")
+        st.write(sub.get("mt_text", ""))
+
+    st.markdown("**Student submission:**")
+    st.write(sub.get("student_text", ""))
+
+    ai_key = f"mqm_ai_suggestions::{selected_student}::{selected_ex}"
+
+    c_ai1, c_ai2 = st.columns([1, 2])
+    with c_ai1:
+        if st.button("Generate AI MQM Suggestions", key="gen_ai_mqm"):
+            prompt = build_ai_mqm_prompt(
+                sub.get("source_text", ""),
+                sub.get("mt_text", "") or "",
+                sub.get("student_text", ""),
+                categories,
+            )
+            system_prompt = "You are a precise MQM assessor. Return only valid JSON."
+            with st.spinner("Generating AI MQM suggestions..."):
+                ai_text = ask_ai_tutor(system_prompt, prompt)
+            suggestions = parse_ai_mqm_suggestions(ai_text, categories)
+            st.session_state[ai_key] = suggestions
+            if suggestions:
+                st.success(f"Loaded {len(suggestions)} AI suggestion(s).")
+            else:
+                st.warning("No usable AI suggestions were returned.")
+    with c_ai2:
+        if ai_key in st.session_state and st.session_state[ai_key]:
+            st.caption("AI suggestions were loaded. You can edit them below before saving.")
+
+    existing = get_mqm_assessment(selected_student, selected_ex)
+    existing_errors = existing.get("errors", [])
+    ai_errors = st.session_state.get(ai_key, [])
+
+    base_errors = ai_errors if ai_errors else existing_errors
+    default_rows = max(3, len(base_errors) if base_errors else 3)
+
+    row_count = st.number_input(
+        "Number of MQM error rows",
+        min_value=1,
+        max_value=20,
+        value=default_rows,
+        step=1,
+        key="mqm_rows",
+    )
+
+    errors = []
+    for i in range(int(row_count)):
+        st.markdown(f"**MQM Error {i + 1}**")
+        old = base_errors[i] if i < len(base_errors) else {}
+
+        col1, col2 = st.columns(2)
+        with col1:
+            options = categories if categories else ["Accuracy"]
+            idx = options.index(old["category"]) if old.get("category") in options else 0
+            category = st.selectbox(
+                f"Category {i + 1}",
+                options,
+                index=idx,
+                key=f"mqm_cat_{i}",
+            )
+        with col2:
+            sev_options = ["minor", "major", "critical"]
+            sev_idx = sev_options.index(old["severity"]) if old.get("severity") in sev_options else 0
+            severity = st.selectbox(
+                f"Severity {i + 1}",
+                sev_options,
+                index=sev_idx,
+                key=f"mqm_sev_{i}",
+            )
+
+        span = st.text_input(f"Span / issue {i + 1}", value=old.get("span", ""), key=f"mqm_span_{i}")
+        comment = st.text_area(f"Comment {i + 1}", value=old.get("comment", ""), height=70, key=f"mqm_comment_{i}")
+
+        if span.strip() or comment.strip():
+            errors.append({
+                "category": category,
+                "severity": severity,
+                "span": span.strip(),
+                "comment": comment.strip(),
+            })
+
+    overall_comment = st.text_area(
+        "Overall MQM comment",
+        value=existing.get("overall_comment", ""),
+        height=120,
+        key="mqm_overall_comment",
+    )
+
+    save_col, clear_col = st.columns(2)
+    with save_col:
+        if st.button("Save MQM assessment", key="save_mqm_assessment"):
+            summary = compute_mqm_score(errors, severity_weights)
+            payload = {
+                "errors": errors,
+                "overall_comment": overall_comment.strip(),
+                "score": summary["score"],
+                "penalty": summary["penalty"],
+                "error_count": summary["error_count"],
+                "per_category": summary["per_category"],
+                "per_severity": summary["per_severity"],
+                "severity_weights": severity_weights,
+                "assessed_at": datetime.datetime.now().isoformat(),
+            }
+            save_mqm_assessment(selected_student, selected_ex, payload)
+            st.success("MQM assessment saved.")
+    with clear_col:
+        if st.button("Clear AI suggestions", key="clear_ai_mqm"):
+            st.session_state.pop(ai_key, None)
+            st.success("AI suggestions cleared.")
+
+    latest = get_mqm_assessment(selected_student, selected_ex)
+    if latest:
+        st.markdown("### Current MQM result")
+        render_mqm_summary(latest)
+        if latest.get("overall_comment"):
+            st.markdown("**Overall comment:**")
+            st.write(latest.get("overall_comment"))
+
+
+def instructor_mqm_analytics_panel():
+    st.subheader("MQM Analytics")
+    mqm_all = load_mqm_assessments()
+    overview_df = build_mqm_overview_df(mqm_all)
+
+    if overview_df.empty:
+        st.info("No MQM analytics available yet.")
+        return
+
+    st.markdown("**MQM Overview by Submission**")
+    st.dataframe(overview_df, use_container_width=True)
+
+    if "MQM Score" in overview_df.columns:
+        try:
+            chart_df = overview_df.copy()
+            chart_df["Label"] = chart_df["Student"].astype(str) + " | " + chart_df["Exercise"].astype(str)
+            st.markdown("**MQM Score by Submission**")
+            st.bar_chart(chart_df.set_index("Label")[["MQM Score"]])
+        except Exception:
+            pass
+
+    cat_rows = []
+    for student, student_data in mqm_all.items():
+        for ex_id, mqm in student_data.items():
+            for cat, vals in mqm.get("per_category", {}).items():
+                cat_rows.append({
+                    "Student": student,
+                    "Exercise": ex_id,
+                    "Category": cat,
+                    "Error Count": vals.get("count", 0),
+                    "Penalty": vals.get("penalty", 0),
+                })
+
+    if cat_rows:
+        cat_df = pd.DataFrame(cat_rows)
+        summary_cat = cat_df.groupby("Category", as_index=False)[["Error Count", "Penalty"]].sum()
+        summary_cat = summary_cat.sort_values(["Penalty", "Error Count"], ascending=[False, False])
+
+        st.markdown("**MQM Totals by Category**")
+        st.dataframe(summary_cat, use_container_width=True)
+
+        try:
+            st.markdown("**Category Penalty Chart**")
+            st.bar_chart(summary_cat.set_index("Category")[["Penalty"]])
+        except Exception:
+            pass
+
+        try:
+            st.markdown("**Category Error Count Chart**")
+            st.bar_chart(summary_cat.set_index("Category")[["Error Count"]])
+        except Exception:
+            pass
+
+
 # ---------------- Instructor Dashboard ----------------
 def instructor_dashboard():
     st.title("Instructor Dashboard")
@@ -816,16 +1391,16 @@ def instructor_dashboard():
             st.warning("Incorrect password. Access denied.")
         return
 
-    st.subheader("🔍 AI Feedback Diagnostics")
+    st.subheader("AI Feedback Diagnostics")
     status = get_ai_backend_status()
 
-    openai_badge = "❌ Not configured"
-    hf_badge = "❌ Not configured"
+    openai_badge = "Not configured"
+    hf_badge = "Not configured"
 
     if status["openai"]:
-        openai_badge = f"✅ Available (model: `{status['openai_model']}`)"
+        openai_badge = f"Available (model: `{status['openai_model']}`)"
     if status["hf"]:
-        hf_badge = "✅ Available (HF_API_TOKEN set)"
+        hf_badge = "Available (HF_API_TOKEN set)"
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -839,16 +1414,20 @@ def instructor_dashboard():
         st.info(
             "No AI backend is currently configured.\n\n"
             "- To use ChatGPT-based feedback, set `OPENAI_API_KEY` (and optional `OPENAI_MODEL`).\n"
-            "- To use a Hugging Face model, set `HF_API_TOKEN`.\n\n"
-            "The app will automatically prefer OpenAI if both are set."
+            "- To use a Hugging Face model, set `HF_API_TOKEN`."
         )
     else:
-        st.success("AI feedback is at least partially configured. Students will be able to request AI feedback.")
+        st.success("AI feedback is at least partially configured.")
 
     st.markdown("---")
 
     exercises = load_json(EXERCISES_FILE)
+    if not isinstance(exercises, dict):
+        exercises = {}
+
     submissions = load_json(SUBMISSIONS_FILE)
+    if not isinstance(submissions, dict):
+        submissions = {}
 
     st.subheader("Create / Edit / Delete Exercise")
     ex_ids = ["New"] + list(exercises.keys())
@@ -864,12 +1443,12 @@ def instructor_dashboard():
     with st.form("exercise_form"):
         st_text = st.text_area("Source Text", value=default_source, height=150)
         mt_text = st.text_area("MT Output (optional)", value=default_mt, height=150)
-        col1, col2, col3 = st.columns(3)
-        with col1:
+        c1, c2, c3 = st.columns(3)
+        with c1:
             save_btn = st.form_submit_button("Save Exercise")
-        with col2:
+        with c2:
             delete_btn = st.form_submit_button("Delete Exercise")
-        with col3:
+        with c3:
             gen_btn = st.form_submit_button("Generate AI Exercise")
 
     if save_btn:
@@ -886,24 +1465,22 @@ def instructor_dashboard():
             "mt_text": (mt_text.strip() or None),
         }
         save_json(EXERCISES_FILE, exercises)
-        st.success(f"Exercise saved! ID: {next_id}")
+        st.success(f"Exercise saved. ID: {next_id}")
 
     if delete_btn and selected_ex != "New":
         exercises.pop(selected_ex, None)
         save_json(EXERCISES_FILE, exercises)
-        st.success(f"Exercise {selected_ex} deleted!")
+        st.success(f"Exercise {selected_ex} deleted.")
 
     if gen_btn:
         prompt = "Write a short culturally rich text for translation students."
         ai_text = ai_generate_text(prompt)
         new_text = ai_text if ai_text else f"This is AI-generated exercise {random.randint(1, 1000)}."
         new_mt = f"MT output for exercise {random.randint(1, 1000)}."
-
         try:
             next_id = str(max([int(k) for k in exercises.keys()] + [0]) + 1).zfill(3)
         except Exception:
             next_id = "001"
-
         exercises[next_id] = {"source_text": new_text, "mt_text": new_mt}
         save_json(EXERCISES_FILE, exercises)
         st.success(f"Exercise saved as ID {next_id}")
@@ -946,16 +1523,14 @@ def instructor_dashboard():
                     file_name=f"{safe_name}_submissions.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
-            except RuntimeError as e:
-                st.warning(str(e))
-            except Exception:
-                st.error("Unexpected error while generating the Word report.")
+            except Exception as e:
+                st.error(f"Word export failed: {e}")
 
-        st.subheader("Download Metrics Summary (Excel)")
+        st.subheader("Download Summary Workbook (Excel)")
         try:
             excel_buf = export_summary_excel(submissions)
             st.download_button(
-                "Download Excel Summary",
+                "Download Excel Workbook",
                 excel_buf,
                 file_name="metrics_summary.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -966,20 +1541,30 @@ def instructor_dashboard():
         try:
             st.subheader("Class Snapshot")
             rows = []
-            for ex_id2, ex in exercises.items():
+            mqm_all = load_mqm_assessments()
+
+            for ex_id2 in exercises.keys():
                 vals = []
+                mqm_vals = []
                 for student, subs in submissions.items():
                     sub = subs.get(ex_id2)
                     if sub:
                         m = sub.get("metrics", {})
                         if m.get("chrF++") is not None:
                             vals.append(m["chrF++"])
-                if vals:
-                    mean_val = round(sum(vals) / max(1, len(vals)), 2)
-                    rows.append({"Exercise": ex_id2, "chrF++ mean": mean_val, "n": len(vals)})
+                        mqm = mqm_all.get(student, {}).get(ex_id2, {})
+                        if mqm.get("score") is not None:
+                            mqm_vals.append(mqm.get("score"))
+                if vals or mqm_vals:
+                    row = {"Exercise": ex_id2, "n": max(len(vals), len(mqm_vals))}
+                    if vals:
+                        row["chrF++ mean"] = round(sum(vals) / max(1, len(vals)), 2)
+                    if mqm_vals:
+                        row["MQM mean"] = round(sum(mqm_vals) / max(1, len(mqm_vals)), 2)
+                    rows.append(row)
 
             if rows:
-                st.dataframe(pd.DataFrame(rows))
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
             else:
                 st.info("No metrics yet to summarize.")
         except Exception:
@@ -989,12 +1574,20 @@ def instructor_dashboard():
     else:
         st.info("No submissions yet.")
 
+    st.markdown("---")
+    instructor_mqm_panel(exercises, submissions)
+    st.markdown("---")
+    instructor_mqm_analytics_panel()
+
 
 # ---------------- Student Dashboard ----------------
 def student_dashboard():
     st.title("Student Dashboard")
 
     exercises = load_json(EXERCISES_FILE)
+    if not isinstance(exercises, dict):
+        exercises = {}
+
     if not exercises:
         st.info("No exercises available yet. Please check back later.")
         return
@@ -1087,7 +1680,6 @@ def student_dashboard():
             "reflection": reflection,
         }
         save_json(SUBMISSIONS_FILE, submissions)
-
         append_submission(student_name, ex_id, submissions[student_name][ex_id])
 
         points = 0
@@ -1102,7 +1694,7 @@ def student_dashboard():
             pass
 
         update_leaderboard(student_name, points)
-        st.success("Submission saved!")
+        st.success("Submission saved.")
         existing_sub = submissions[student_name][ex_id]
 
     if not existing_sub or not existing_sub.get("student_text", "").strip():
@@ -1131,6 +1723,16 @@ def student_dashboard():
 - **Characters Typed**: {st.session_state[keys_key]}
 """)
 
+    st.subheader("MQM Assessment")
+    mqm = get_mqm_assessment(student_name, ex_id)
+    if mqm:
+        render_mqm_summary(mqm)
+        if mqm.get("overall_comment"):
+            st.markdown("**Instructor MQM Comment:**")
+            st.write(mqm.get("overall_comment"))
+    else:
+        st.info("No MQM assessment has been added yet by the instructor.")
+
     extra = quick_linguistic_hints(ex.get("source_text", ""), student_text)
     feedback_msgs = generate_feedback(
         metrics,
@@ -1157,11 +1759,13 @@ def student_dashboard():
         history = []
         for ex_id2, sub2 in submissions.get(student_name, {}).items():
             m2 = sub2.get("metrics", {})
+            mqm2 = get_mqm_assessment(student_name, ex_id2)
             history.append({
-                "ex": ex_id2,
+                "Exercise": ex_id2,
                 "BLEU": m2.get("BLEU"),
                 "chrF++": m2.get("chrF++"),
                 "Edits": m2.get("edits", 0),
+                "MQM Score": mqm2.get("score"),
             })
 
         if history:
@@ -1169,15 +1773,14 @@ def student_dashboard():
             df_hist = pd.DataFrame(history)
 
             try:
-                if not df_hist.empty:
-                    df_trend = df_hist.set_index("ex")[["BLEU", "chrF++"]]
-                    st.line_chart(df_trend)
+                trend_cols = [c for c in ["BLEU", "chrF++", "MQM Score"] if c in df_hist.columns]
+                if trend_cols:
+                    st.line_chart(df_hist.set_index("Exercise")[trend_cols])
             except Exception:
                 pass
 
             try:
-                df_edits = df_hist.set_index("ex")[["Edits"]]
-                st.bar_chart(df_edits)
+                st.bar_chart(df_hist.set_index("Exercise")[["Edits"]])
             except Exception:
                 pass
     except Exception:
@@ -1222,7 +1825,6 @@ Focus on accuracy, register, idiomaticity, and cultural appropriateness.
 Keep responses clear and concise.
 You may use both English and Arabic.
 """
-
             user_prompt = f"""
 TASK TYPE: {task_type}
 
@@ -1238,7 +1840,6 @@ STUDENT SUBMISSION:
 STUDENT QUESTION:
 {student_prompt}
 """
-
             with st.spinner("Requesting AI response..."):
                 ai_text = ask_ai_tutor(system_prompt, user_prompt)
 
@@ -1251,7 +1852,7 @@ STUDENT QUESTION:
 
 # ---------------- Localisation Lab ----------------
 def localisation_lab():
-    st.title("🌍 Localisation Lab")
+    st.title("Localisation Lab")
     st.write(
         "Interactive exercises on localisation (English ↔ Arabic). "
         "Work here is saved to the same JSON/leaderboard as the core lab."
@@ -1283,14 +1884,14 @@ def localisation_lab():
     exercise = st.sidebar.selectbox(
         "Choose a localisation exercise",
         [
-            "1️⃣ Translation vs Localisation",
-            "2️⃣ Cultural Adaptation in Advertising",
-            "3️⃣ Conventions: Dates, Units, Currency",
-            "4️⃣ Tone & Website/App UX",
-            "5️⃣ Post-editing: Error Detection",
-            "6️⃣ App Store Description",
-            "7️⃣ Strategy & Theory Reflection",
-            "🎨 Sticker / text / image task (from instructor)",
+            "1 Translation vs Localisation",
+            "2 Cultural Adaptation in Advertising",
+            "3 Conventions: Dates, Units, Currency",
+            "4 Tone & Website/App UX",
+            "5 Post-editing: Error Detection",
+            "6 App Store Description",
+            "7 Strategy & Theory Reflection",
+            "Sticker / text / image task (from instructor)",
         ],
         key="loc_ex_select",
     )
@@ -1336,71 +1937,9 @@ def localisation_lab():
             pass
 
         update_leaderboard(student_name, points)
+        st.success("Localisation submission saved and leaderboard updated.")
 
-        st.success("Localisation submission saved and leaderboard updated!")
-
-        def _fmt(v):
-            return "—" if v is None else v
-
-        st.subheader("Your Metrics (Localisation)")
-        st.write(f"• Length Ratio (target/src): {_fmt(metrics['length_ratio'])}")
-        st.write(f"• BLEU: {_fmt(metrics['BLEU'])}")
-        st.write(f"• chrF++: {_fmt(metrics['chrF++'])}")
-        st.write(f"• BERTScore F1: {_fmt(metrics['BERTScore_F1'])}")
-        st.write(f"• Time Spent: {round(time_spent, 2)} sec")
-        st.write(f"• Characters Typed: {keystrokes}")
-
-        extra = quick_linguistic_hints(source_text, main_text)
-        feedback_msgs = generate_feedback(
-            metrics,
-            "Localisation",
-            source_text,
-            main_text,
-            extra_hints=extra,
-        )
-
-        st.subheader("Adaptive Feedback")
-        if feedback_msgs:
-            for m in feedback_msgs:
-                st.markdown(m)
-        else:
-            st.info("No specific issues triggered. Focus on cohesion, clarity, and consistent localisation choices.")
-
-        st.subheader("Leaderboard (including localisation tasks)")
-        show_leaderboard()
-
-        st.subheader("Optional AI Feedback (Localisation)")
-        if st.button("Get AI feedback on this localisation task", key=f"ai_loc_{ex_id}"):
-            prompt = build_ai_feedback_prompt(source_text, "", main_text, "Localisation")
-            with st.spinner("Requesting AI feedback..."):
-                ai_text = generate_ai_feedback(prompt)
-
-            if ai_text:
-                st.markdown("### AI feedback / suggestion (Localisation)")
-                st.write(ai_text)
-            else:
-                st.warning(
-                    "AI feedback is not configured or temporarily unavailable.\n\n"
-                    "To enable it, set OPENAI_API_KEY (for ChatGPT) or HF_API_TOKEN (for Hugging Face)."
-                )
-
-    ex_id_map = {
-        "1️⃣ Translation vs Localisation": "LOC_1",
-        "2️⃣ Cultural Adaptation in Advertising": "LOC_2",
-        "3️⃣ Conventions: Dates, Units, Currency": "LOC_3",
-        "4️⃣ Tone & Website/App UX": "LOC_4",
-        "5️⃣ Post-editing: Error Detection": "LOC_5",
-        "6️⃣ App Store Description": "LOC_6",
-        "7️⃣ Strategy & Theory Reflection": "LOC_7",
-        "🎨 Sticker / text / image task (from instructor)": "LOC_STICKER",
-    }
-
-    current_ex_id = ex_id_map.get(exercise, "LOC_STICKER")
-    start_key = f"loc_start_{student_name}_{current_ex_id}"
-    if start_key not in st.session_state:
-        st.session_state[start_key] = time.time()
-
-    if exercise == "1️⃣ Translation vs Localisation":
+    if exercise == "1 Translation vs Localisation":
         st.subheader("Translation vs Localisation")
         source_text = "Welcome to our app! Enjoy lightning-fast delivery and unbeatable deals every Friday."
         st.write("Decide how you would localise this text for Arabic users.")
@@ -1409,7 +1948,7 @@ def localisation_lab():
         if st.button("Save this task", key="loc1_save"):
             save_loc_submission("LOC_1", source_text, main_text, reflection)
 
-    elif exercise == "2️⃣ Cultural Adaptation in Advertising":
+    elif exercise == "2 Cultural Adaptation in Advertising":
         st.subheader("Cultural Adaptation in Advertising")
         source_text = "Grab your Halloween special now and trick-or-treat yourself with 50% off!"
         st.write("Adapt this for an Arabic-speaking audience while keeping the persuasive purpose.")
@@ -1418,7 +1957,7 @@ def localisation_lab():
         if st.button("Save this task", key="loc2_save"):
             save_loc_submission("LOC_2", source_text, main_text, reflection)
 
-    elif exercise == "3️⃣ Conventions: Dates, Units, Currency":
+    elif exercise == "3 Conventions: Dates, Units, Currency":
         st.subheader("Conventions: Dates, Units, Currency")
         source_text = "Offer valid until 12/31/2025. Free shipping on orders above $75. Package weight: 3.5 lbs."
         st.write("Rewrite/localise the text using conventions suitable for Arabic readers.")
@@ -1427,7 +1966,7 @@ def localisation_lab():
         if st.button("Save this task", key="loc3_save"):
             save_loc_submission("LOC_3", source_text, main_text, reflection)
 
-    elif exercise == "4️⃣ Tone & Website/App UX":
+    elif exercise == "4 Tone & Website/App UX":
         st.subheader("Tone & Website/App UX")
         source_text = "Oops! Something went wrong. Please try again later."
         st.write("Localise this microcopy for a polished Arabic app experience.")
@@ -1436,7 +1975,7 @@ def localisation_lab():
         if st.button("Save this task", key="loc4_save"):
             save_loc_submission("LOC_4", source_text, main_text, reflection)
 
-    elif exercise == "5️⃣ Post-editing: Error Detection":
+    elif exercise == "5 Post-editing: Error Detection":
         st.subheader("Post-editing: Error Detection")
         source_text = "The conference starts on Monday at 9:30 a.m. in Hall B."
         mt_output = "يبدأ المؤتمر يوم الإثنين الساعة 9:30 مساءً في القاعة ب."
@@ -1450,7 +1989,7 @@ def localisation_lab():
         if st.button("Save this task", key="loc5_save"):
             save_loc_submission("LOC_5", source_text, main_text, reflection)
 
-    elif exercise == "6️⃣ App Store Description":
+    elif exercise == "6 App Store Description":
         st.subheader("App Store Description")
         source_text = (
             "Track your habits, build routines, and stay motivated with daily reminders "
@@ -1462,7 +2001,7 @@ def localisation_lab():
         if st.button("Save this task", key="loc6_save"):
             save_loc_submission("LOC_6", source_text, main_text, reflection)
 
-    elif exercise == "7️⃣ Strategy & Theory Reflection":
+    elif exercise == "7 Strategy & Theory Reflection":
         st.subheader("Strategy & Theory Reflection")
         source_text = "Reflect on the difference between translation and localisation in 1–2 short paragraphs."
         st.write(source_text)
@@ -1472,8 +2011,11 @@ def localisation_lab():
             save_loc_submission("LOC_7", source_text, main_text, reflection)
 
     else:
-        st.subheader("🎨 Sticker / text / image task")
+        st.subheader("Sticker / text / image task")
         loc_stickers = load_json(LOC_STICKERS_FILE)
+        if not isinstance(loc_stickers, dict):
+            loc_stickers = {}
+
         if not loc_stickers:
             st.info("No sticker/text/image task has been published by the instructor yet.")
             return
@@ -1517,7 +2059,7 @@ def main():
 
     st.markdown(
         "<div style='padding:8px;border:1px solid #ddd;border-radius:8px;background:#f7f9ff'>"
-        "<b>EduApp – Build:</b> 2025-11-10 v4 (translation + localisation lab + AI feedback)</div>",
+        "<b>EduApp – Build:</b> 2025-11-10 v7 (translation + localisation + MQM analytics + AI MQM suggestions)</div>",
         unsafe_allow_html=True,
     )
 
