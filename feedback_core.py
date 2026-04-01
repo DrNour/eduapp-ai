@@ -164,3 +164,33 @@ def generate_feedback(metrics: dict, task_type: str, extra_hints=None):
         if len(final) >= 4:
             break
     return final
+
+def export_excel(submissions):
+    import pandas as pd
+    from mqm_feature import load_mqm
+
+    mqm_all = load_mqm()
+
+    rows = []
+    for student, subs in submissions.items():
+        for ex_id, sub in subs.items():
+            mqm = mqm_all.get(student, {}).get(ex_id, {})
+
+            rows.append({
+                "Student": student,
+                "Exercise": ex_id,
+                "Text": sub.get("student_text"),
+                "BLEU": sub.get("metrics", {}).get("BLEU"),
+                "MQM Score": mqm.get("score"),
+                "MQM Penalty": mqm.get("penalty"),
+                "MQM Errors": mqm.get("count"),
+            })
+
+    df = pd.DataFrame(rows)
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Submissions", index=False)
+
+    buffer.seek(0)
+    return buffer
