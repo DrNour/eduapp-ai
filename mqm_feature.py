@@ -1,92 +1,200 @@
 import streamlit as st
+import json
+import datetime
+import re
+
+from pathlib import Path
+
+DATA_DIR = Path("./data")
+MQM_FILE = DATA_DIR / "mqm_assessments.json"
+MQM_CONFIG_FILE = DATA_DIR / "mqm_config.json"
 
 
-MQM_CATEGORIES = [
-    "accuracy",
-    "fluency",
-    "terminology",
-    "style",
-    "locale"
-]
+# ---------------- Storage ----------------
+def load_json(file):
+    if file.exists():
+        try:
+            return json.loads(file.read_text(encoding="utf-8"))
+        except:
+            return {}
+    return {}
 
 
-MQM_WEIGHTS = {
-    "minor": 1,
-    "major": 5,
-    "critical": 10
-}
+def save_json(file, data):
+    file.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
 
 
-def init_mqm_structure():
+# ---------------- MQM Config ----------------
+def load_mqm_config():
+    cfg = load_json(MQM_CONFIG_FILE)
+    if not cfg:
+        cfg = {
+            "categories": [
+                "Accuracy",
+                "Fluency",
+                "Terminology",
+                "Style",
+                "Grammar",
+                "Spelling / punctuation",
+                "Omission",
+                "Addition",
+                "Mistranslation"
+            ],
+            "severity_weights": {
+                "minor": 1,
+                "major": 5,
+                "critical": 10
+            }
+        }
+        save_json(MQM_CONFIG_FILE, cfg)
+    return cfg
+
+
+# ---------------- MQM Storage ----------------
+def load_mqm():
+    data = load_json(MQM_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def save_mqm(student, ex_id, payload):
+    data = load_mqm()
+    if student not in data:
+        data[student] = {}
+    data[student][ex_id] = payload
+    save_json(MQM_FILE, data)
+
+
+def get_mqm(student, ex_id):
+    return load_mqm().get(student, {}).get(ex_id, {})
+
+
+# ---------------- MQM Scoring ----------------
+def compute_score(errors, weights):
+    penalty = 0
+    for e in errors:
+        penalty += weights.get(e["severity"], 0)
+
     return {
-        cat: {"minor": 0, "major": 0, "critical": 0}
-        for cat in MQM_CATEGORIES
+        "score": max(0, 100 - penalty),
+        "penalty": penalty,
+        "count": len(errors)
     }
 
 
-def compute_mqm_score(mqm_dict):
-    total = 0
-    for cat in MQM_CATEGORIES:
-        for severity, weight in MQM_WEIGHTS.items():
-            total += mqm_dict[cat][severity] * weight
-    return total
+# ---------------- AI MQM ----------------
+def build_prompt(src, mt, student, categories):
+    return f"""
+You are an MQM evaluator.
+
+Categories: {", ".join(categories)}
+Severity: minor, major, critical
+
+Return ONLY JSON list:
+[{{"category":"","severity":"","span":"","comment":""}}]
+
+SOURCE:
+{src}
+
+MT:
+{mt or "(none)"}
+
+STUDENT:
+{student}
+"""
 
 
-def mqm_label(score):
-    if score <= 5:
-        return "Excellent"
-    elif score <= 15:
-        return "Good"
-    elif score <= 30:
-        return "Needs Revision"
-    else:
-        return "Poor"
+def parse_ai(text, categories):
+    try:
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+        else:
+            data = json.loads(text)
+
+        clean = []
+        for e in data:
+            if e.get("category") in categories:
+                clean.append(e)
+        return clean
+    except:
+        return []
 
 
-def mqm_rating_form(student_name, ex_id, submission):
-    st.subheader("MQM Evaluation")
+# ---------------- UI ----------------
+def mqm_rating_form(student, ex_id, submission, ask_ai_fn):
 
-    if "mqm" not in submission:
-        submission["mqm"] = init_mqm_structure()
+    st.subheader("MQM Assessment")
 
-    mqm = submission["mqm"]
+    cfg = load_mqm_config()
+    categories = cfg["categories"]
+    weights = cfg["severity_weights"]
 
-    with st.form(f"mqm_form_{student_name}_{ex_id}"):
+    existing = get_mqm(student, ex_id)
+    ai_key = f"mqm_ai_{student}_{ex_id}"
 
-        for cat in MQM_CATEGORIES:
-            st.markdown(f"### {cat.capitalize()}")
+    # ---------- AI Button ----------
+    if st.button("🤖 Generate AI MQM Suggestions"):
+        prompt = build_prompt(
+            submission["source_text"],
+            submission.get("mt_text", ""),
+            submission["student_text"],
+            categories
+        )
 
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                mqm[cat]["minor"] = st.number_input(
-                    f"{cat} minor",
-                    min_value=0,
-                    value=mqm[cat]["minor"],
-                    key=f"{cat}_minor_{student_name}_{ex_id}"
-                )
-            with col2:
-                mqm[cat]["major"] = st.number_input(
-                    f"{cat} major",
-                    min_value=0,
-                    value=mqm[cat]["major"],
-                    key=f"{cat}_major_{student_name}_{ex_id}"
-                )
-            with col3:
-                mqm[cat]["critical"] = st.number_input(
-                    f"{cat} critical",
-                    min_value=0,
-                    value=mqm[cat]["critical"],
-                    key=f"{cat}_critical_{student_name}_{ex_id}"
-                )
+        ai_text = ask_ai_fn("MQM evaluator", prompt)
+        suggestions = parse_ai(ai_text, categories)
+        st.session_state[ai_key] = suggestions
 
-        notes = st.text_area("Instructor Notes", value=submission.get("mqm_notes", ""))
+    base = st.session_state.get(ai_key, existing.get("errors", []))
 
-        submit = st.form_submit_button("Save MQM Evaluation")
+    errors = []
 
-    if submit:
-        submission["mqm"] = mqm
-        submission["mqm_score"] = compute_mqm_score(mqm)
-        submission["mqm_label"] = mqm_label(submission["mqm_score"])
-        submission["mqm_notes"] = notes
+    for i in range(max(3, len(base))):
+        st.markdown(f"**Error {i+1}**")
 
-        st.success("MQM evaluation saved!")
+        old = base[i] if i < len(base) else {}
+
+        cat = st.selectbox(
+            f"Category {i}",
+            categories,
+            index=categories.index(old["category"]) if old.get("category") in categories else 0
+        )
+
+        sev = st.selectbox(
+            f"Severity {i}",
+            ["minor", "major", "critical"],
+            index=["minor", "major", "critical"].index(old["severity"]) if old.get("severity") in ["minor","major","critical"] else 0
+        )
+
+        span = st.text_input(f"Span {i}", value=old.get("span",""))
+        comment = st.text_area(f"Comment {i}", value=old.get("comment",""))
+
+        if span or comment:
+            errors.append({
+                "category": cat,
+                "severity": sev,
+                "span": span,
+                "comment": comment
+            })
+
+    overall = st.text_area("Overall comment", value=existing.get("overall_comment",""))
+
+    if st.button("Save MQM"):
+        score = compute_score(errors, weights)
+
+        payload = {
+            "errors": errors,
+            "overall_comment": overall,
+            "score": score["score"],
+            "penalty": score["penalty"],
+            "count": score["count"],
+            "created": datetime.datetime.now().isoformat()
+        }
+
+        save_mqm(student, ex_id, payload)
+        st.success("Saved!")
+
+    # display
+    if existing:
+        st.markdown("### Current MQM")
+        st.write(existing)
