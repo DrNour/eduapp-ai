@@ -974,8 +974,9 @@ Give concise feedback suitable for a university translation classroom. Please:
 You may answer partly in Arabic where it helps the student, but keep the structure clear and concise.
 """
 
-
 def ask_ai_tutor(system_prompt: str, user_prompt: str):
+
+    # ---------- OpenAI ----------
     openai_key = get_secret("OPENAI_API_KEY", "")
     openai_model = get_secret("OPENAI_MODEL", "gpt-4.1-mini")
 
@@ -984,66 +985,55 @@ def ask_ai_tutor(system_prompt: str, user_prompt: str):
             if hasattr(openai, "OpenAI"):
                 client = openai.OpenAI(api_key=openai_key)
 
-                try:
-                    resp = client.responses.create(
-                        model=openai_model,
-                        instructions=system_prompt,
-                        input=user_prompt,
-                        max_output_tokens=900,
-                    )
-                    text = getattr(resp, "output_text", None)
-                    if text:
-                        return text.strip()
-                except Exception:
-                    resp = client.chat.completions.create(
-                        model=openai_model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        max_tokens=900,
-                        temperature=0.3,
-                    )
-                    text = resp.choices[0].message.content
-                    if text:
-                        return text.strip()
-            else:
-                openai.api_key = openai_key
-                resp = openai.ChatCompletion.create(
+                resp = client.chat.completions.create(
                     model=openai_model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    max_tokens=900,
-                    temperature=0.3,
+                    max_tokens=700,
+                    temperature=0.4,
                 )
-                text = resp.choices[0].message["content"]
-                if text:
-                    return text.strip()
+
+                return resp.choices[0].message.content.strip()
+
         except Exception as e:
             return f"OpenAI error: {e}"
 
+    # ---------- Hugging Face fallback ----------
     hf_token = get_secret("HF_API_TOKEN", "")
+
     if hf_token:
         try:
             import requests
-            headers = {"Authorization": f"Bearer {hf_token}"}
-            payload = {"inputs": system_prompt + "\n\n" + user_prompt}
+
+            headers = {
+                "Authorization": f"Bearer {hf_token}"
+            }
+
+            payload = {
+                "inputs": system_prompt + "\n\n" + user_prompt
+            }
+
             response = requests.post(
-                "https://api-inference.huggingface.co/models/gpt2",
+                "https://api-inference.huggingface.co/models/google/flan-t5-large",
                 headers=headers,
                 json=payload,
-                timeout=30,
+                timeout=30
             )
+
             if response.status_code == 200:
                 data = response.json()
-                if isinstance(data, list) and data and "generated_text" in data[0]:
+
+                if isinstance(data, list) and "generated_text" in data[0]:
                     return data[0]["generated_text"].strip()
-            return f"Hugging Face error: status {response.status_code}"
+
+            return f"HF error: {response.status_code}"
+
         except Exception as e:
             return f"Hugging Face error: {e}"
 
+    # ---------- No backend ----------
     return None
 
 
